@@ -61,12 +61,20 @@ with tab1:
             st.dataframe(res, width="stretch")
             if use_agent:
                 for _, hit in res.head(3).iterrows():
-                    with st.spinner(f"Agent analizuje: {hit['matched_name']}..."):
-                        out = ask_agent(name, dob, country, hit)
-                    icon = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}.get(out["decision"], "❔")
-                    st.subheader(f"{icon} {out['decision']}: {hit['matched_name']}")
-                    st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
-                    st.write(out.get("rationale"))
+                    st.divider()
+                    left, right = st.columns(2)
+                    with left:
+                        st.markdown("#### Stary system: tylko nazwiska")
+                        st.error(f"🔔 ALERT: {hit['matched_name']} (podobieństwo {hit['score']})")
+                        st.write("Alert trafia do kolejki. Analityk musi ręcznie porównać datę urodzenia, kraj i dokumenty, co zajmuje ok. 5–15 minut.")
+                    with right:
+                        st.markdown("#### Mini-Iris: z agentem AI")
+                        with st.spinner("Agent analizuje..."):
+                            out = ask_agent(name, dob, country, hit)
+                        icon = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}.get(out["decision"], "❔")
+                        st.subheader(f"{icon} {out['decision']}")
+                        st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
+                        st.write(out.get("rationale"))
 
 with tab2:
     file = st.file_uploader("Wgraj CSV z kolumną 'name'", type="csv")
