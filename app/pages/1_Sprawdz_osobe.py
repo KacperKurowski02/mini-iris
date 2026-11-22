@@ -1,5 +1,6 @@
 from pathlib import Path
-import json
+from datetime import datetime
+import json, hashlib
 import pandas as pd
 import streamlit as st
 import anthropic
@@ -8,6 +9,7 @@ from rapidfuzz import process, fuzz, utils
 
 ROOT = Path(__file__).parent.parent.parent
 DATA = ROOT / "data" / "processed"
+LOG = DATA / "audit_log.jsonl"
 load_dotenv(ROOT / ".env")
 client = anthropic.Anthropic()
 POLICY = (ROOT / "policy" / "sanctions_policy.md").read_text()
@@ -42,8 +44,22 @@ def ask_agent(name, dob, country, hit):
     t = next(b.text for b in r.content if b.type == "text")
     return json.loads(t[t.find("{"):t.rfind("}") + 1])
 
+def append_audit(entry):
+    prev = "0" * 64
+    if LOG.exists():
+        lines = LOG.read_text().strip().splitlines()
+        if lines:
+            prev = json.loads(lines[-1])["hash"]
+    entry["prev_hash"] = prev
+    text = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+    entry["hash"] = hashlib.sha256(text.encode()).hexdigest()
+    with open(LOG, "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+ICONS = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}
+
 st.title("Sprawdź osobę na liście sankcyjnej OFAC")
-tab1, tab2 = st.tabs(["Jedna osoba", "Lista (CSV)"])
+tab1, tab2, tab3 = st.tabs(["Jedna osoba", "Lista (CSV)", "Audit log"])
 
 with tab1:
     name = st.text_input("Imię i nazwisko")
@@ -54,27 +70,62 @@ with tab1:
 
     if st.button("Sprawdź") and name:
         res = screen(name)
+        decisions = []
+        if use_agent and not res.empty:
+            for _, hit in res.head(3).iterrows():
+                with st.spinner(f"Agent analizuje: {hit['matched_name']}..."):
+                    decisions.append((hit.to_dict(), ask_agent(name, dob, country, hit)))
+        st.session_state["last"] = {"name": name, "dob": dob, "country": country,
+                                    "res": res, "decisions": decisions}
+
+    last = st.session_state.get("last")
+    if last:
+        res = last["res"]
         if res.empty:
             st.success("✅ Brak trafień na liście OFAC SDN")
         else:
             st.warning(f"⚠️ {len(res)} potencjalnych trafień")
             st.dataframe(res, width="stretch")
-            if use_agent:
-                for _, hit in res.head(3).iterrows():
-                    st.divider()
-                    left, right = st.columns(2)
-                    with left:
-                        st.markdown("#### Stary system: tylko nazwiska")
-                        st.error(f"🔔 ALERT: {hit['matched_name']} (podobieństwo {hit['score']})")
-                        st.write("Alert trafia do kolejki. Analityk musi ręcznie porównać datę urodzenia, kraj i dokumenty, co zajmuje ok. 5–15 minut.")
-                    with right:
-                        st.markdown("#### Mini-Iris: z agentem AI")
-                        with st.spinner("Agent analizuje..."):
-                            out = ask_agent(name, dob, country, hit)
-                        icon = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}.get(out["decision"], "❔")
-                        st.subheader(f"{icon} {out['decision']}")
-                        st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
-                        st.write(out.get("rationale"))
+
+        for i, (hit, out) in enumerate(last["decisions"]):
+            st.divider()
+            left, right = st.columns(2)
+            with left:
+                st.markdown("#### Stary system: tylko nazwiska")
+                st.error(f"🔔 ALERT: {hit['matched_name']} (podobieństwo {hit['score']})")
+                st.write("Alert trafia do kolejki. Analityk musi ręcznie porównać datę urodzenia, kraj i dokumenty, co zajmuje ok. 5–15 minut.")
+            with right:
+                st.markdown("#### Mini-Iris: z agentem AI")
+                st.subheader(f"{ICONS.get(out['decision'], '❔')} {out['decision']}")
+                st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
+                st.write(out.get("rationale"))
+
+                with st.form(f"review_{i}"):
+                    st.markdown("**Przegląd analityka**")
+                    verdict = st.radio("Decyzja", ["Zatwierdzam decyzję agenta",
+                                                   "Zmieniam na: TRUE_MATCH",
+                                                   "Zmieniam na: FALSE_POSITIVE"])
+                    comment = st.text_input("Komentarz")
+                    reviewer = st.text_input("Analityk", value="analityk_1")
+                    if st.form_submit_button("Zapisz do audit logu"):
+                        final = out["decision"] if verdict.startswith("Zatwierdzam") else verdict.split(": ")[1]
+                        append_audit({
+                            "timestamp": datetime.now().isoformat(timespec="seconds"),
+                            "customer_name": last["name"],
+                            "customer_dob": last["dob"],
+                            "customer_country": last["country"],
+                            "sdn_id": int(hit["sdn_id"]),
+                            "sdn_name": hit["matched_name"],
+                            "agent_decision": out["decision"],
+                            "agent_rule": out.get("rule"),
+                            "agent_confidence": float(out.get("confidence") or 0),
+                            "final_decision": final,
+                            "overridden": final != out["decision"],
+                            "reviewer": reviewer,
+                            "comment": comment,
+                            "model": "claude-haiku-5-5",
+                        })
+                        st.success(f"Zapisano w audit logu: {final}")
 
 with tab2:
     file = st.file_uploader("Wgraj CSV z kolumną 'name'", type="csv")
@@ -89,3 +140,11 @@ with tab2:
         result = pd.DataFrame(out)
         st.dataframe(result, width="stretch")
         st.download_button("Pobierz wyniki", result.to_csv(index=False), "wyniki.csv")
+
+with tab3:
+    if LOG.exists():
+        rows = [json.loads(l) for l in LOG.read_text().splitlines() if l.strip()]
+        st.write(f"{len(rows)} wpisów")
+        st.dataframe(pd.DataFrame(rows).iloc[::-1], width="stretch")
+    else:
+        st.info("Dziennik jest pusty.")
