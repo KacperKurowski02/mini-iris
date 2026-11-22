@@ -17,7 +17,10 @@ SYSTEM = f"""Jesteś analitykiem compliance w banku. Rozstrzygasz alerty sankcyj
 
 {POLICY}
 
-Odpowiedz tylko JSON-em: {{"decision": "TRUE_MATCH|FALSE_POSITIVE|ESCALATE", "rule": "R?", "rationale": "...", "confidence": 0.0-1.0}}"""
+Odpowiedz tylko JSON-em:
+{{"decision": "TRUE_MATCH|FALSE_POSITIVE|ESCALATE", "rule": "R?", "rationale": "...", "confidence": 0.0-1.0,
+  "factors": [{{"factor": "name|dob|nationality|passport", "client": "...", "sdn": "...", "result": "MATCH|MISMATCH|PARTIAL|UNKNOWN", "rule": "R?"}}]}}
+W "factors" oceń osobno każdy czynnik: name, dob, nationality, passport (brak danych po którejkolwiek stronie = UNKNOWN)."""
 
 MODEL = "claude-haiku-5-5"
 CONFIDENCE_THRESHOLD = 0.8
@@ -47,11 +50,14 @@ def ask_agent(name, dob, country, hit):
                                messages=[{"role": "user", "content": text}])
     t = next(b.text for b in r.content if b.type == "text")
     out = json.loads(t[t.find("{"):t.rfind("}") + 1])
+    if not isinstance(out.get("factors"), list):
+        out["factors"] = []
     conf = float(out.get("confidence") or 0)
     if out["decision"] != "ESCALATE" and conf < CONFIDENCE_THRESHOLD:
         out["rationale"] = (f"[Auto-eskalacja: pewność {conf} < {CONFIDENCE_THRESHOLD}, "
                             f"agent proponował {out['decision']}] " + str(out.get("rationale", "")))
         out["decision"] = "ESCALATE"
+        out["auto_escalated"] = True
     return out
 
 def append_audit(entry):
@@ -67,6 +73,7 @@ def append_audit(entry):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 ICONS = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}
+FACTOR_ICONS = {"MATCH": "✅ MATCH", "MISMATCH": "❌ MISMATCH", "PARTIAL": "🟠 PARTIAL", "UNKNOWN": "❔ UNKNOWN"}
 
 st.title("Sprawdź osobę na liście sankcyjnej OFAC")
 tab1, tab2, tab3 = st.tabs(["Jedna osoba", "Lista (CSV)", "Audit log"])
@@ -108,6 +115,17 @@ with tab1:
                 st.markdown("#### Mini-Iris: z agentem AI")
                 st.subheader(f"{ICONS.get(out['decision'], '❔')} {out['decision']}")
                 st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
+                factors = [f for f in out.get("factors", []) if isinstance(f, dict)]
+                if factors:
+                    st.markdown("**Ocena czynników**")
+                    ft = pd.DataFrame([{
+                        "Czynnik": f.get("factor", ""),
+                        "Klient": str(f.get("client", "")),
+                        "Lista SDN": str(f.get("sdn", "")),
+                        "Wynik": FACTOR_ICONS.get(str(f.get("result", "")).upper(), "❔ " + str(f.get("result", ""))),
+                        "Reguła": f.get("rule", ""),
+                    } for f in factors])
+                    st.dataframe(ft, hide_index=True, width="stretch")
                 st.write(out.get("rationale"))
 
                 with st.form(f"review_{i}"):
@@ -121,6 +139,7 @@ with tab1:
                         final = out["decision"] if verdict.startswith("Zatwierdzam") else verdict.split(": ")[1]
                         append_audit({
                             "timestamp": datetime.now().isoformat(timespec="seconds"),
+                            "alert_type": "customer",
                             "customer_name": last["name"],
                             "customer_dob": last["dob"],
                             "customer_country": last["country"],
@@ -129,6 +148,9 @@ with tab1:
                             "agent_decision": out["decision"],
                             "agent_rule": out.get("rule"),
                             "agent_confidence": float(out.get("confidence") or 0),
+                            "agent_rationale": out.get("rationale"),
+                            "auto_escalated": bool(out.get("auto_escalated")),
+                            "factors": out.get("factors", []),
                             "final_decision": final,
                             "overridden": final != out["decision"],
                             "reviewer": reviewer,
@@ -140,16 +162,61 @@ with tab1:
                         st.success(f"Zapisano w audit logu: {final}")
 
 with tab2:
-    file = st.file_uploader("Wgraj CSV z kolumną 'name'", type="csv")
+    file = st.file_uploader("Wgraj CSV z kolumną 'name' (opcjonalnie: 'dob', 'country')", type="csv")
+    batch_agent = st.checkbox("Tryb agenta: agent rozstrzyga najlepsze trafienie każdej osoby (max 20 wierszy)")
+    if batch_agent:
+        st.warning("Każdy wiersz z trafieniem to jedno płatne zapytanie do API (Haiku: ułamek centa). Limit: 20 wierszy.")
     if file:
         df = pd.read_csv(file)
+        if batch_agent:
+            df = df.head(20)
         out = []
-        for n in df["name"]:
+        bar = st.progress(0.0, text="Screening...")
+        for i, row in enumerate(df.to_dict("records")):
+            n = str(row.get("name", ""))
+            d = row.get("dob") if pd.notna(row.get("dob", None)) else ""
+            c = row.get("country") if pd.notna(row.get("country", None)) else ""
             r = screen(n)
-            out.append({"name": n, "trafienia": len(r),
-                        "najlepsze_trafienie": r["matched_name"].iloc[0] if len(r) else "",
-                        "score": r["score"].iloc[0] if len(r) else None})
+            rec = {"name": n, "trafienia": len(r),
+                   "najlepsze_trafienie": r["matched_name"].iloc[0] if len(r) else "",
+                   "score": r["score"].iloc[0] if len(r) else None}
+            if batch_agent:
+                if len(r):
+                    hit = r.iloc[0]
+                    try:
+                        a = ask_agent(n, d, c, hit)
+                    except Exception as e:
+                        a = {"decision": "ESCALATE", "rule": "BŁĄD", "confidence": 0,
+                             "rationale": f"Błąd agenta: {e}", "factors": []}
+                    rec.update({"decyzja": a["decision"], "reguła": a.get("rule"),
+                                "pewność": a.get("confidence"),
+                                "czynniki": "; ".join(f"{f.get('factor')}: {f.get('result')}"
+                                                      for f in a.get("factors", []) if isinstance(f, dict)),
+                                "uzasadnienie": a.get("rationale")})
+                    append_audit({
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "alert_type": "customer_batch",
+                        "customer_name": n, "customer_dob": d, "customer_country": c,
+                        "sdn_id": int(hit["sdn_id"]), "sdn_name": hit["matched_name"],
+                        "agent_decision": a["decision"], "agent_rule": a.get("rule"),
+                        "agent_confidence": float(a.get("confidence") or 0),
+                        "agent_rationale": a.get("rationale"),
+                        "auto_escalated": bool(a.get("auto_escalated")),
+                        "factors": a.get("factors", []),
+                        "final_decision": a["decision"], "overridden": False,
+                        "reviewer": "auto", "comment": "",
+                        "model": MODEL, "policy_version": POLICY_VERSION,
+                        "confidence_threshold": CONFIDENCE_THRESHOLD,
+                    })
+                else:
+                    rec.update({"decyzja": "NO_HIT", "reguła": "", "pewność": None, "czynniki": "", "uzasadnienie": ""})
+            out.append(rec)
+            bar.progress((i + 1) / len(df), text=f"{i + 1}/{len(df)}: {n}")
+        bar.empty()
         result = pd.DataFrame(out)
+        if batch_agent and "decyzja" in result:
+            st.write(result["decyzja"].value_counts().to_dict())
+            st.success("Decyzje agenta zapisano w audit logu (reviewer: auto).")
         st.dataframe(result, width="stretch")
         st.download_button("Pobierz wyniki", result.to_csv(index=False), "wyniki.csv")
 
@@ -157,6 +224,10 @@ with tab3:
     if LOG.exists():
         rows = [json.loads(l) for l in LOG.read_text().splitlines() if l.strip()]
         st.write(f"{len(rows)} wpisów")
-        st.dataframe(pd.DataFrame(rows).iloc[::-1], width="stretch")
+        log_df = pd.DataFrame(rows)
+        if "factors" in log_df:
+            log_df["factors"] = log_df["factors"].apply(
+                lambda v: "; ".join(f"{f.get('factor')}: {f.get('result')}" for f in v) if isinstance(v, list) else "")
+        st.dataframe(log_df.iloc[::-1], width="stretch")
     else:
         st.info("Dziennik jest pusty.")
