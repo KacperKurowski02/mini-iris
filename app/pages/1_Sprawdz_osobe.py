@@ -19,6 +19,10 @@ SYSTEM = f"""Jesteś analitykiem compliance w banku. Rozstrzygasz alerty sankcyj
 
 Odpowiedz tylko JSON-em: {{"decision": "TRUE_MATCH|FALSE_POSITIVE|ESCALATE", "rule": "R?", "rationale": "...", "confidence": 0.0-1.0}}"""
 
+MODEL = "claude-haiku-5-5"
+CONFIDENCE_THRESHOLD = 0.8
+POLICY_VERSION = hashlib.sha256(POLICY.encode()).hexdigest()[:12]
+
 @st.cache_data
 def load():
     return pd.read_csv(DATA / "names.csv"), pd.read_csv(DATA / "people.csv")
@@ -39,10 +43,16 @@ def ask_agent(name, dob, country, hit):
     text = (f"KLIENT: {name}; data ur.: {dob or 'brak danych'}; obywatelstwo: {country or 'brak danych'}; paszport: brak danych\n"
             f"LISTA SDN: {hit['matched_name']}; data ur.: {hit['dob']}; obywatelstwo: {hit['nationality']}; program: {hit['program']}\n"
             f"Podobieństwo nazwiska: {hit['score']}")
-    r = client.messages.create(model="claude-haiku-5-5", max_tokens=1500, system=SYSTEM,
+    r = client.messages.create(model=MODEL, max_tokens=1500, system=SYSTEM,
                                messages=[{"role": "user", "content": text}])
     t = next(b.text for b in r.content if b.type == "text")
-    return json.loads(t[t.find("{"):t.rfind("}") + 1])
+    out = json.loads(t[t.find("{"):t.rfind("}") + 1])
+    conf = float(out.get("confidence") or 0)
+    if out["decision"] != "ESCALATE" and conf < CONFIDENCE_THRESHOLD:
+        out["rationale"] = (f"[Auto-eskalacja: pewność {conf} < {CONFIDENCE_THRESHOLD}, "
+                            f"agent proponował {out['decision']}] " + str(out.get("rationale", "")))
+        out["decision"] = "ESCALATE"
+    return out
 
 def append_audit(entry):
     prev = "0" * 64
@@ -123,7 +133,9 @@ with tab1:
                             "overridden": final != out["decision"],
                             "reviewer": reviewer,
                             "comment": comment,
-                            "model": "claude-haiku-5-5",
+                            "model": MODEL,
+                            "policy_version": POLICY_VERSION,
+                            "confidence_threshold": CONFIDENCE_THRESHOLD,
                         })
                         st.success(f"Zapisano w audit logu: {final}")
 
