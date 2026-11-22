@@ -67,9 +67,11 @@ def ask_agent(p, hits, country_flag):
         out["rationale"] = (f"[Auto-eskalacja: pewność {conf} < {CONFIDENCE_THRESHOLD}, "
                             f"agent proponował {out['decision']}] " + str(out.get("rationale", "")))
         out["decision"] = "ESCALATE"
+        out["auto_escalated"] = True
     if country_flag and out["decision"] == "FALSE_POSITIVE":
         out["rationale"] = "[Auto-eskalacja: kraj wysokiego ryzyka (P4)] " + str(out.get("rationale", ""))
         out["decision"] = "ESCALATE"
+        out["auto_escalated"] = True
     return out
 
 def append_audit(entry):
@@ -203,6 +205,8 @@ if last:
                             "agent_decision": out["decision"],
                             "agent_rule": out.get("rule"),
                             "agent_confidence": float(out.get("confidence") or 0),
+                            "agent_rationale": out.get("rationale"),
+                            "auto_escalated": bool(out.get("auto_escalated")),
                             "factors": out.get("factors", []),
                             "final_decision": final,
                             "overridden": final != out["decision"],

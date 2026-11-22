@@ -21,6 +21,25 @@ End-to-end prototype of an AI agent that resolves sanctions-screening alerts aga
 5. **Audit log**: every decision stored in a SHA-256 hash chain; any later edit is detectable. `05_audit.ipynb`
 6. **Dashboard**: Streamlit view of screening funnel, agent metrics, confusion matrix and per-alert rationale. `app/dashboard.py`
 
+## Interactive app (Streamlit)
+
+`streamlit run app/dashboard.py` opens a multi-page app:
+
+| Page | What it does |
+|---|---|
+| **Dashboard** | Screening funnel, agent accuracy, confusion matrix on the evaluation sample. |
+| **1 · Sprawdź osobę** | Screen one person (or a CSV batch) against OFAC SDN. The agent adjudicates each hit; old system vs. Mini-Iris shown side by side. Batch mode runs the agent on up to 20 rows and writes every decision to the audit log. |
+| **2 · Płatności** | Separate **payment screening agent** with its own policy (`policy/payment_policy.md`, rules P1–P6): screens beneficiary and ordering party, flags high-risk countries, three one-click demo payments. |
+| **3 · Kolejka analityka** | Analyst queue of open ESCALATE cases, ops metrics (decisions by type, human override rate, auto-escalations) and a live **audit-chain verification** button. |
+
+Key controls:
+
+- **Human in the loop.** Every agent decision goes through an analyst review form (approve or override) before it is logged; overrides are tracked.
+- **Confidence threshold.** Any TRUE_MATCH / FALSE_POSITIVE below 0.8 confidence is auto-escalated to a human, and the reason is written into the rationale.
+- **Policy versioning.** Each log entry stores a hash of the exact policy text, the model and the threshold used, so every decision can be reproduced.
+- **Per-factor explanations.** The agent scores each attribute (name, DOB, nationality, passport; for payments: parties, country, bank, purpose) as MATCH / MISMATCH / PARTIAL / UNKNOWN with the rule applied.
+- **Tamper-evident audit log.** Customer, batch and payment decisions share one SHA-256 hash chain (`data/processed/audit_log.jsonl`).
+
 ## Design choices
 
 - **Policy as text, not code.** Compliance can change rules without a deploy; the agent cites the rule it applied.
@@ -32,7 +51,7 @@ pip install pandas rapidfuzz faker anthropic python-dotenv streamlit
 1. Download SDN.CSV, ALT.CSV, ADD.CSV from OFAC into `data/raw/`
 2. Add `ANTHROPIC_API_KEY=...` to a `.env` file in the repo root
 3. Run notebooks 01 → 05 in order
-4. `streamlit run app/dashboard.py`
+4. `streamlit run app/dashboard.py` and open the pages in the sidebar
 
 ## Limitations
 
