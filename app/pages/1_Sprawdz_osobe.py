@@ -1,9 +1,21 @@
 from pathlib import Path
+import json
 import pandas as pd
 import streamlit as st
+import anthropic
+from dotenv import load_dotenv
 from rapidfuzz import process, fuzz, utils
 
-DATA = Path(__file__).parent.parent.parent / "data" / "processed"
+ROOT = Path(__file__).parent.parent.parent
+DATA = ROOT / "data" / "processed"
+load_dotenv(ROOT / ".env")
+client = anthropic.Anthropic()
+POLICY = (ROOT / "policy" / "sanctions_policy.md").read_text()
+SYSTEM = f"""Jesteś analitykiem compliance w banku. Rozstrzygasz alerty sankcyjne WYŁĄCZNIE według poniższej polityki.
+
+{POLICY}
+
+Odpowiedz tylko JSON-em: {{"decision": "TRUE_MATCH|FALSE_POSITIVE|ESCALATE", "rule": "R?", "rationale": "...", "confidence": 0.0-1.0}}"""
 
 @st.cache_data
 def load():
@@ -21,18 +33,40 @@ def screen(query, threshold=85):
     return df.merge(people[["id", "dob", "nationality", "program"]],
                     left_on="sdn_id", right_on="id", how="left").drop(columns="id")
 
+def ask_agent(name, dob, country, hit):
+    text = (f"KLIENT: {name}; data ur.: {dob or 'brak danych'}; obywatelstwo: {country or 'brak danych'}; paszport: brak danych\n"
+            f"LISTA SDN: {hit['matched_name']}; data ur.: {hit['dob']}; obywatelstwo: {hit['nationality']}; program: {hit['program']}\n"
+            f"Podobieństwo nazwiska: {hit['score']}")
+    r = client.messages.create(model="claude-haiku-5-5", max_tokens=1500, system=SYSTEM,
+                               messages=[{"role": "user", "content": text}])
+    t = next(b.text for b in r.content if b.type == "text")
+    return json.loads(t[t.find("{"):t.rfind("}") + 1])
+
 st.title("Sprawdź osobę na liście sankcyjnej OFAC")
 tab1, tab2 = st.tabs(["Jedna osoba", "Lista (CSV)"])
 
 with tab1:
     name = st.text_input("Imię i nazwisko")
+    c1, c2 = st.columns(2)
+    dob = c1.text_input("Data urodzenia (opcjonalnie)", placeholder="np. 07 Oct 1952")
+    country = c2.text_input("Obywatelstwo (opcjonalnie)", placeholder="np. Russia")
+    use_agent = st.checkbox("Zapytaj agenta AI o decyzję (max 3 najlepsze trafienia)")
+
     if st.button("Sprawdź") and name:
         res = screen(name)
         if res.empty:
             st.success("✅ Brak trafień na liście OFAC SDN")
         else:
-            st.warning(f"⚠️ {len(res)} potencjalnych trafień: porównaj datę urodzenia i kraj")
+            st.warning(f"⚠️ {len(res)} potencjalnych trafień")
             st.dataframe(res, width="stretch")
+            if use_agent:
+                for _, hit in res.head(3).iterrows():
+                    with st.spinner(f"Agent analizuje: {hit['matched_name']}..."):
+                        out = ask_agent(name, dob, country, hit)
+                    icon = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}.get(out["decision"], "❔")
+                    st.subheader(f"{icon} {out['decision']}: {hit['matched_name']}")
+                    st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
+                    st.write(out.get("rationale"))
 
 with tab2:
     file = st.file_uploader("Wgraj CSV z kolumną 'name'", type="csv")
