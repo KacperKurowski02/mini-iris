@@ -12,7 +12,7 @@ def load():
 names, people = load()
 
 def screen(query, threshold=85):
-    hits = process.extract(query, names["name"], scorer=fuzz.token_sort_ratio,
+    hits = process.extract(query, names["name"], scorer=fuzz.token_set_ratio,
                            processor=utils.default_process, score_cutoff=threshold, limit=None)
     rows = [{"sdn_id": names.loc[idx, "id"], "matched_name": m, "score": round(s)} for m, s, idx in hits]
     if not rows:
