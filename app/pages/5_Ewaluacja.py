@@ -33,7 +33,7 @@ with st.expander("▶️ Uruchom nową ewaluację (płatne zapytania do API)"):
     mode = c2.selectbox("Tryb", list(A.MODES), format_func=lambda m: A.MODES[m])
     n = c3.slider("Liczba alertów", 10, 30, 24)
     pin, pout = A.PRICES[model]
-    calls = 1 if mode == "single" else 5
+    calls = {"single": 1, "tools": 5, "multi": 9}[mode]
     est = n * calls * (3500 * pin + 400 * pout) / 1e6
     st.caption(f"Szacowany koszt: ok. ${est:.3f} (≈ {calls} wywołań API na alert). Limit: 30 alertów.")
     note = st.text_input("Notatka do przebiegu (np. co zmieniłeś w prompcie)")

@@ -277,8 +277,37 @@ SUBMIT_TOOL = {
 }
 
 
-def tools_for(names):
-    return [{"name": n, **TOOL_SPECS[n]} for n in names] + [SUBMIT_TOOL]
+FINDINGS_TOOL = {
+    "name": "submit_findings",
+    "description": "Kończy zbieranie dowodów i przekazuje dossier decydentowi. NIE podejmuj decyzji. Wywołaj dokładnie raz.",
+    "input_schema": {"type": "object", "properties": {
+        "facts": {"type": "array", "description": "Ustalone fakty, każdy z narzędzia, które go zwróciło",
+                  "items": {"type": "object", "properties": {
+                      "factor": {"type": "string", "description": "np. name, dob, nationality, passport, country, bank"},
+                      "client": {"type": "string"}, "sdn": {"type": "string"},
+                      "source_tool": {"type": "string"}, "note": {"type": "string"}},
+                      "required": ["factor", "source_tool"]}},
+        "summary": {"type": "string", "description": "Krótkie podsumowanie ustaleń, bez decyzji"},
+        "open_questions": {"type": "array", "items": {"type": "string"},
+                           "description": "Czego nie udało się ustalić"},
+    }, "required": ["facts", "summary", "open_questions"]},
+}
+
+REVIEW_TOOL = {
+    "name": "submit_review",
+    "description": "Wynik niezależnej kontroli (zasada czterech oczu). Wywołaj dokładnie raz.",
+    "input_schema": {"type": "object", "properties": {
+        "verdict": {"type": "string", "enum": ["APPROVE", "REVISE"]},
+        "issues": {"type": "array", "items": {"type": "string"},
+                   "description": "Konkretne błędy w decyzji (puste przy APPROVE)"},
+        "missing_evidence": {"type": "array", "items": {"type": "string"},
+                             "description": "Czego śledczy powinien jeszcze dowieść (puste, jeśli dowody są kompletne)"},
+    }, "required": ["verdict", "issues", "missing_evidence"]},
+}
+
+
+def tools_for(names, final_tool=SUBMIT_TOOL):
+    return [{"name": n, **TOOL_SPECS[n]} for n in names] + [final_tool]
 
 
 CUSTOMER_TOOLS = ["get_sdn_entry", "get_customer", "compare_dates", "search_sdn", "get_past_decisions"]
@@ -337,10 +366,11 @@ def _short(obj, n=400):
     return s if len(s) <= n else s[:n] + "…"
 
 
-def run_agent(system, case_text, tool_names, model=MODEL, max_steps=MAX_STEPS):
+def run_agent(system, case_text, tool_names, model=MODEL, max_steps=MAX_STEPS, final_tool=SUBMIT_TOOL, agent="Agent"):
     """Pętla tool use: model wybiera narzędzia, my je wykonujemy i odsyłamy wyniki,
-    aż model wywoła submit_decision albo skończą się rundy."""
-    tools = tools_for(tool_names)
+    aż model wywoła narzędzie końcowe (final_tool, np. submit_decision) albo skończą się rundy."""
+    tools = tools_for(tool_names, final_tool)
+    final_name = final_tool["name"]
     system = system.replace("{max_steps}", str(max_steps))
     messages = [{"role": "user", "content": case_text}]
     trace, final = [], None
@@ -364,19 +394,20 @@ def run_agent(system, case_text, tool_names, model=MODEL, max_steps=MAX_STEPS):
         calls = [b for b in r.content if b.type == "tool_use"]
         if not calls:
             if stop == "end_turn" and step < max_steps:
-                trace.append({"step": step, "tool": "(brak)", "input": {}, "output": "Agent nie wywołał narzędzia, przypominamy o submit_decision",
-                              "thought": thought})
-                messages.append({"role": "user", "content": "Zakończ dochodzenie, wywołując narzędzie submit_decision."})
+                trace.append({"step": step, "agent": agent, "tool": "(brak)", "input": {},
+                              "output": f"Agent nie wywołał narzędzia, przypominamy o {final_name}", "thought": thought})
+                messages.append({"role": "user", "content": f"Zakończ, wywołując narzędzie {final_name}."})
                 continue
             break
 
         results = []
         for b in calls:
-            if b.name == "submit_decision":
+            if b.name == final_name:
                 final = dict(b.input)
-                trace.append({"step": step, "tool": "submit_decision", "input": {"decision": final.get("decision"),
-                              "rule": final.get("rule"), "confidence": final.get("confidence")},
-                              "output": "decyzja zapisana", "thought": thought})
+                shown = ({k: final.get(k) for k in ("decision", "rule", "confidence")} if final_name == "submit_decision"
+                         else {"verdict": final.get("verdict")} if final_name == "submit_review" else {})
+                trace.append({"step": step, "agent": agent, "tool": final_name, "input": shown,
+                              "output": _short(final, 600), "thought": thought})
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": "OK"})
                 continue
             fn = EXECUTORS.get(b.name)
@@ -386,7 +417,8 @@ def run_agent(system, case_text, tool_names, model=MODEL, max_steps=MAX_STEPS):
                 out, err = fn(**b.input), False
             except Exception as e:
                 out, err = {"error": str(e)}, True
-            trace.append({"step": step, "tool": b.name, "input": dict(b.input), "output": _short(out), "thought": thought})
+            trace.append({"step": step, "agent": agent, "tool": b.name, "input": dict(b.input), "output": _short(out),
+                          "thought": thought})
             results.append({"type": "tool_result", "tool_use_id": b.id,
                             "content": json.dumps(out, ensure_ascii=False, default=str), "is_error": err})
         if final is not None:
@@ -431,6 +463,140 @@ def finalize(final, trace, usage, stop, high_risk=False):
     return out
 
 
+# ============================================================
+# ZESPÓŁ AGENTÓW: Śledczy -> Decydent -> Recenzent
+# ============================================================
+# Każdy agent ma jedną rolę i własny prompt. Śledczy ma narzędzia, ale nie może decydować.
+# Decydent widzi tylko dossier śledczego (nie może sam szukać faktów). Recenzent sprawdza decyzję
+# i może odesłać sprawę: po więcej dowodów do Śledczego albo do poprawki do Decydenta.
+MAX_REVISIONS = 2
+
+INVESTIGATOR_RULES = """Jesteś ŚLEDCZYM w zespole compliance banku. Twoje jedyne zadanie: zebrać dowody narzędziami.
+NIE podejmujesz decyzji i nie piszesz, czy to trafienie, czy nie. Decyzję podejmie inny agent na podstawie Twojego dossier.
+- Opieraj się tylko na wynikach narzędzi. Każdy fakt podaj ze źródłem (source_tool).
+- Nie powtarzaj tych samych wywołań. Masz najwyżej {max_steps} rund.
+- Gdy masz dowody, wywołaj submit_findings (dokładnie raz). Braki danych wpisz do open_questions."""
+
+INVESTIGATOR_CUSTOMER = f"""{INVESTIGATOR_RULES}
+
+Zbierz: pełny wpis SDN (get_sdn_entry), dane KYC klienta (get_customer, jeśli jest customer_id),
+porównanie dat urodzenia (compare_dates, zawsze narzędziem), wcześniejsze decyzje (get_past_decisions).
+Fakty dla czynników: name, dob, nationality, passport.
+
+Polityka banku (żebyś wiedział, które dowody są ważne):
+{SANCTIONS_POLICY}"""
+
+INVESTIGATOR_PAYMENT = f"""{INVESTIGATOR_RULES}
+
+Zbierz: ryzyko kraju beneficjenta (check_country_risk), kraj banku z BIC (lookup_bic), wpisy SDN dla trafień
+(get_sdn_entry), brakujące strony przelewu (search_sdn), wcześniejsze decyzje (get_past_decisions).
+Fakty dla czynników: beneficiary_name, ordering_party_name, country, bank, payment_purpose.
+
+Polityka banku (żebyś wiedział, które dowody są ważne):
+{PAYMENT_POLICY}"""
+
+ADJUDICATOR_RULES = """Jesteś DECYDENTEM w zespole compliance banku. Dostajesz alert i dossier dowodów od śledczego.
+Nie masz narzędzi do szukania faktów: rozstrzygasz WYŁĄCZNIE na podstawie dossier i polityki.
+- Nie zakładaj faktów spoza dossier. Brak danych = UNKNOWN.
+- Jeśli są uwagi recenzenta, odnieś się do każdej z nich.
+- Wywołaj submit_decision (dokładnie raz): decyzja, numer zasady, uzasadnienie, evidence (fakty z dossier), factors, pewność."""
+
+ADJUDICATOR_CUSTOMER = f"""{ADJUDICATOR_RULES}
+Pola "factors": name, dob, nationality, passport.
+
+POLITYKA BANKU:
+{SANCTIONS_POLICY}"""
+
+ADJUDICATOR_PAYMENT = f"""{ADJUDICATOR_RULES}
+Pola "factors": beneficiary_name, ordering_party_name, country, bank, payment_purpose.
+
+POLITYKA BANKU:
+{PAYMENT_POLICY}"""
+
+REVIEWER_RULES = """Jesteś RECENZENTEM (zasada czterech oczu) w zespole compliance banku. Sprawdzasz decyzję innego agenta.
+Sprawdź kolejno:
+1. Czy zastosowana zasada naprawdę pasuje do faktów z dossier?
+2. Czy każdy fakt w uzasadnieniu i evidence jest w dossier (nic nie zostało wymyślone)?
+3. Czy TRUE_MATCH nie opiera się na samym nazwisku (R7/P5)?
+4. Czy FALSE_POSITIVE lub TRUE_MATCH nie zapadły mimo brakujących kluczowych danych (wtedy powinno być ESCALATE)?
+5. Czy pewność jest adekwatna do dowodów?
+APPROVE, jeśli decyzja jest zgodna z polityką. REVISE z konkretnymi uwagami w issues, jeśli nie.
+Jeśli brakuje dowodów, które śledczy mógł zdobyć narzędziami, wpisz je do missing_evidence.
+Nie żądaj rzeczy niemożliwych (np. paszportu, którego nie ma w żadnym źródle). Wywołaj submit_review (dokładnie raz)."""
+
+REVIEWER_CUSTOMER = f"""{REVIEWER_RULES}
+
+POLITYKA BANKU:
+{SANCTIONS_POLICY}"""
+
+REVIEWER_PAYMENT = f"""{REVIEWER_RULES}
+
+POLITYKA BANKU:
+{PAYMENT_POLICY}"""
+
+
+def _merge_usage(total, u):
+    for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "api_calls", "cost_usd"):
+        total[k] = total.get(k, 0) + (u.get(k) or 0)
+    return total
+
+
+def run_team(case, investigator_system, tool_names, adjudicator_system, reviewer_system,
+             model=MODEL, high_risk=False, max_revisions=MAX_REVISIONS):
+    t0 = time.time()
+    trace, usage, stop = [], {}, None
+
+    def call(system, text, tools, final_tool, agent, max_steps):
+        nonlocal stop
+        final, tr, u, stop = run_agent(system, text, tools, model=model, max_steps=max_steps,
+                                       final_tool=final_tool, agent=agent)
+        trace.extend(tr)
+        _merge_usage(usage, u)
+        return final
+
+    def as_json(x):
+        return json.dumps(x, ensure_ascii=False, indent=1, default=str)
+
+    dossier = call(investigator_system, case + "\nZbierz dowody do tego alertu.", tool_names, FINDINGS_TOOL,
+                   "Investigator", MAX_STEPS) or {"facts": [], "summary": "Śledczy nie dostarczył dossier.",
+                                                   "open_questions": ["brak dossier"]}
+    feedback, decision, review, revisions = "", None, None, 0
+    for rnd in range(max_revisions + 1):
+        revisions = rnd
+        decision = call(adjudicator_system, f"{case}\n\nDOSSIER ŚLEDCZEGO:\n{as_json(dossier)}{feedback}",
+                        [], SUBMIT_TOOL, "Adjudicator", 2)
+        review = call(reviewer_system, f"{case}\n\nDOSSIER ŚLEDCZEGO:\n{as_json(dossier)}\n\n"
+                                       f"DECYZJA DO SPRAWDZENIA:\n{as_json(decision)}",
+                      [], REVIEW_TOOL, "Reviewer", 2) or {"verdict": "REVISE", "issues": ["Recenzent nie odpowiedział"],
+                                                         "missing_evidence": []}
+        if review.get("verdict") == "APPROVE" or rnd == max_revisions:
+            break
+        if review.get("missing_evidence"):
+            more = call(investigator_system,
+                        f"{case}\n\nTWOJE DOTYCHCZASOWE DOSSIER:\n{as_json(dossier)}\n\n"
+                        "RECENZENT PROSI O UZUPEŁNIENIE:\n- " + "\n- ".join(map(str, review["missing_evidence"]))
+                        + "\nZbierz brakujące dowody i zwróć pełne, uzupełnione dossier.",
+                        tool_names, FINDINGS_TOOL, "Investigator", MAX_STEPS)
+            if more:
+                dossier = more
+        feedback = ("\n\nUWAGI RECENZENTA DO POPRZEDNIEJ DECYZJI (popraw je):\n- "
+                    + "\n- ".join(map(str, review.get("issues") or ["brak szczegółów"])))
+
+    for i, t in enumerate(trace, 1):
+        t["step"] = i
+    usage.update(seconds=round(time.time() - t0, 1), steps=len(trace), model=model,
+                 cost_usd=round(usage.get("cost_usd", 0), 6))
+    out = finalize(decision, trace, usage, stop, high_risk=high_risk)
+    if review.get("verdict") != "APPROVE" and out["decision"] != "ESCALATE":
+        out["rationale"] = (f"[Auto-eskalacja: recenzent nie zatwierdził decyzji {out['decision']} "
+                            f"po {revisions} poprawkach] " + str(out.get("rationale", "")))
+        out["decision"] = "ESCALATE"
+        out["auto_escalated"] = True
+    out.update(mode="multi", review=review, revisions=revisions, dossier=dossier)
+    return out
+
+
+
 SYSTEM_SINGLE = f"""Jesteś analitykiem compliance w banku. Rozstrzygasz alert sankcyjny dotyczący KLIENTA wyłącznie według polityki banku.
 Wszystkie dane masz w treści alertu (nie masz innych narzędzi). Od razu wywołaj submit_decision.
 W "factors" oceń osobno: name, dob, nationality, passport (brak danych po którejkolwiek stronie = UNKNOWN).
@@ -439,12 +605,18 @@ POLITYKA BANKU:
 {SANCTIONS_POLICY}"""
 
 # Tryby agenta (do porównań w ewaluacji)
-MODES = {"tools": "Agent z narzędziami (wiele kroków)", "single": "Jedno zapytanie (bez narzędzi, baseline)"}
+MODES = {"tools": "Agent z narzędziami (wiele kroków)",
+         "multi": "Zespół agentów: Śledczy → Decydent → Recenzent",
+         "single": "Jedno zapytanie (bez narzędzi, baseline)"}
 
 
 def prompt_version(mode="tools"):
     """Hash promptu systemowego + opisów narzędzi: zmienia się, gdy zmienisz prompt albo narzędzia."""
-    text = (SYSTEM_CUSTOMER + json.dumps(tools_for(CUSTOMER_TOOLS), sort_keys=True)) if mode == "tools" else SYSTEM_SINGLE
+    if mode == "multi":
+        text = (INVESTIGATOR_CUSTOMER + ADJUDICATOR_CUSTOMER + REVIEWER_CUSTOMER
+                + json.dumps(tools_for(CUSTOMER_TOOLS, FINDINGS_TOOL), sort_keys=True))
+    else:
+        text = (SYSTEM_CUSTOMER + json.dumps(tools_for(CUSTOMER_TOOLS), sort_keys=True)) if mode == "tools" else SYSTEM_SINGLE
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
@@ -461,12 +633,16 @@ def investigate_customer(name, dob, country, hit, customer_id=None, model=MODEL,
         case += (f"Wpis SDN: data ur.: {sdn.get('dob') or 'brak danych'}; obywatelstwo: {sdn.get('nationality') or 'brak danych'}; "
                  f"paszport: {sdn.get('passport') or 'brak danych'}; program: {sdn.get('program')}\n"
                  "Rozstrzygnij alert.")
-        return finalize(*run_agent(SYSTEM_SINGLE, case, [], model=model, max_steps=2))
+        out = finalize(*run_agent(SYSTEM_SINGLE, case, [], model=model, max_steps=2))
+        out["mode"] = "single"
+        return out
+    if mode == "multi":
+        return run_team(case, INVESTIGATOR_CUSTOMER, CUSTOMER_TOOLS, ADJUDICATOR_CUSTOMER, REVIEWER_CUSTOMER, model=model)
     case += "Przeprowadź dochodzenie i rozstrzygnij alert."
     return finalize(*run_agent(SYSTEM_CUSTOMER, case, CUSTOMER_TOOLS, model=model))
 
 
-def investigate_payment(p, hits, country_flag, model=MODEL):
+def investigate_payment(p, hits, country_flag, model=MODEL, mode="tools"):
     lines = ["ALERT SANKCYJNY (płatność)",
              f"Przelew: zleceniodawca: {p['ordering'] or 'brak danych'}; beneficjent: {p['beneficiary'] or 'brak danych'}; "
              f"kraj beneficjenta: {p['country'] or 'brak danych'}; bank beneficjenta: {p['bank'] or 'brak danych'}; "
@@ -477,6 +653,9 @@ def investigate_payment(p, hits, country_flag, model=MODEL):
                          f"podobieństwo {h['score']}")
     else:
         lines.append("Screening nazwisk: brak trafień na liście SDN.")
+    if mode == "multi":
+        return run_team("\n".join(lines), INVESTIGATOR_PAYMENT, PAYMENT_TOOLS, ADJUDICATOR_PAYMENT, REVIEWER_PAYMENT,
+                        model=model, high_risk=country_flag)
     lines.append("Przeprowadź dochodzenie i rozstrzygnij alert.")
     return finalize(*run_agent(SYSTEM_PAYMENT, "\n".join(lines), PAYMENT_TOOLS, model=model), high_risk=country_flag)
 
@@ -501,12 +680,23 @@ def audit_fields(out):
         "agent_trace": out.get("trace", []),
         "agent_usage": out.get("usage", {}),
         "model": out.get("usage", {}).get("model", MODEL),
+        "agent_mode": out.get("mode", "tools"),
+        "agent_review": out.get("review"),
+        "agent_revisions": out.get("revisions", 0),
         "confidence_threshold": CONFIDENCE_THRESHOLD,
     }
 
 
+AGENT_ICONS = {"Investigator": "🕵️", "Adjudicator": "⚖️", "Reviewer": "🔍"}
+
+
 def render_trace(out, key=""):
     import streamlit as st
+    if out.get("review"):
+        rv = out["review"]
+        msg = (f"🔍 Recenzent: **{rv.get('verdict', '?')}** · poprawki: {out.get('revisions', 0)}"
+               + ("".join(f"\n- {i}" for i in rv.get("issues", [])) if rv.get("issues") else ""))
+        (st.success if rv.get("verdict") == "APPROVE" else st.warning)(msg)
     u = out.get("usage") or {}
     trace = out.get("trace") or []
     st.caption(f"🤖 {u.get('model', MODEL)} · kroki: {u.get('steps', len(trace))} · wywołania API: {u.get('api_calls', '?')} · "
@@ -519,7 +709,8 @@ def render_trace(out, key=""):
         if not trace:
             st.write("Brak kroków.")
         for t in trace:
-            st.markdown(f"**Krok {t['step']} · `{t['tool']}`** "
+            who = f"{AGENT_ICONS.get(t.get('agent'), '')} {t['agent']} · " if t.get("agent") not in (None, "Agent") else ""
+            st.markdown(f"**Krok {t['step']} · {who}`{t['tool']}`** "
                         + ", ".join(f"{k}={v}" for k, v in (t.get("input") or {}).items()))
             if t.get("thought"):
                 st.caption(f"💭 {t['thought']}")

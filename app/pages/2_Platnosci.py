@@ -4,15 +4,15 @@ from datetime import datetime
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # żeby zaimportować app/iris_agent.py
-from iris_agent import (PAYMENT_POLICY, HIGH_RISK, policy_version, ICONS, screen, append_audit,
+from iris_agent import (MODES, PAYMENT_POLICY, HIGH_RISK, policy_version, ICONS, screen, append_audit,
                         investigate_payment, audit_fields, render_trace, render_factors)
 
 POLICY_VERSION = policy_version(PAYMENT_POLICY)
 
 
-def ask_agent(p, hits, country_flag):
-    """Agent z narzędziami: sprawdza kraj, kod BIC banku, wpisy SDN i wcześniejsze decyzje, potem decyduje."""
-    return investigate_payment(p, hits, country_flag)
+def ask_agent(p, hits, country_flag, mode="tools"):
+    """mode="tools": jeden agent z narzędziami. mode="multi": Śledczy -> Decydent -> Recenzent."""
+    return investigate_payment(p, hits, country_flag, mode=mode)
 
 
 # Przykładowe przelewy do demo (jedno kliknięcie)
@@ -53,6 +53,7 @@ amount = c1.number_input("Kwota", min_value=0.0, step=100.0, key="pay_amount")
 currency = c2.selectbox("Waluta", ["PLN", "EUR", "USD", "GBP", "CHF"], key="pay_currency")
 title = st.text_input("Tytuł przelewu", key="pay_title")
 use_agent = st.checkbox("Zapytaj agenta AI o decyzję", value=True)
+mode = st.radio("Tryb agenta", ["tools", "multi"], format_func=MODES.get, horizontal=True)
 
 if st.button("Sprawdź przelew") and (beneficiary or ordering):
     p = dict(ordering=ordering, beneficiary=beneficiary, country=country, bank=bank,
@@ -67,7 +68,7 @@ if st.button("Sprawdź przelew") and (beneficiary or ordering):
     out = None
     if use_agent and (hits or country_flag):
         with st.spinner("Agent analizuje przelew..."):
-            out = ask_agent(p, hits, country_flag)
+            out = ask_agent(p, hits, country_flag, mode)
     st.session_state["pay_last"] = {"p": p, "hits": hits, "flag": country_flag, "out": out}
 
 last = st.session_state.get("pay_last")

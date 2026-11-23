@@ -1,0 +1,4 @@
+run_id,timestamp,model,mode,prompt_version,policy_version,seed,note,n,missed_true_matches,true_matches_blocked,false_positives_auto_closed,fp_reduction,wrong_blocks,escalation_rate,policy_accuracy,avg_steps,avg_seconds,avg_cost_usd,total_cost_usd,errors
+20261123-213807_tools_haiku-5-5,2026-11-23T21:38:07,claude-haiku-5-5,tools,88f7e4708d07,326f10292099,42,tool-use agent,24,0,8/8,10/16,0.625,0,0.25,0.833,5.0,7.0,0.00108,0.0258,0
+20261123-214851_multi_haiku-5-5,2026-11-23T21:48:51,claude-haiku-5-5,multi,2d2e480ccb8f,326f10292099,42,multi-agent,24,0,7/8,13/16,0.812,0,0.167,0.917,8.6,26.5,0.00404,0.0969,0
+20261123-215059_single_haiku-5-5,2026-11-23T21:50:59,claude-haiku-5-5,single,acffea3f6c5b,326f10292099,42,single-call baseline,24,0,8/8,13/16,0.812,0,0.125,0.958,1.0,4.9,0.00064,0.0154,0

@@ -59,6 +59,11 @@ st.markdown(f"""
    analityków w podobnych sprawach. Gdy ma dowody, wywołuje narzędzie **submit_decision**: jedna z trzech decyzji,
    uzasadnienie z numerem zasady, lista dowodów, ocena czynników i pewność (0.0–1.0). Każdy krok widać w UI
    („Ślad dochodzenia agenta”) i jest zapisany w audit logu. Limit: {MAX_STEPS} rund, żeby agent nie krążył w nieskończoność.
+   **Tryb „zespół agentów”** dzieli tę pracę na trzy role, jak w prawdziwym dziale compliance:
+   🕵️ **Śledczy** zbiera dowody narzędziami, ale nie wolno mu decydować; ⚖️ **Decydent** nie ma narzędzi i decyduje
+   tylko na podstawie dossier śledczego; 🔍 **Recenzent** (zasada czterech oczu) sprawdza, czy decyzja zgadza się
+   z polityką i z dowodami. Może odesłać sprawę po brakujące dowody albo do poprawki. Jeśli po 2 poprawkach dalej
+   się nie zgadza, sprawa idzie do człowieka.
 5. **Bezpiecznik pewności.** Jeśli agent mówi „to nie on” albo „to on”, ale jego pewność jest niższa niż
    **{CONFIDENCE_THRESHOLD}**, system sam zmienia decyzję na **ESCALATE**. Niepewna AI nie może sama zamknąć sprawy.
 6. **Kolejka analityka.** Wszystkie ESCALATE trafiają do człowieka (strona *Kolejka analityka*). Analityk może

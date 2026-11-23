@@ -38,6 +38,16 @@ In the app the agent is not a single prompt. `app/iris_agent.py` runs an Anthrop
 
 Guardrails around the loop: max 8 rounds, unknown tools / tool errors are returned to the model as errors, a missing or malformed decision becomes ESCALATE, and the confidence threshold and high-risk-country rule are enforced in code after the model decides. Every step (tool, arguments, result) plus token usage and cost is shown in the UI as an investigation trace and stored in the hash-chained audit log.
 
+## Multi-agent mode: Investigator → Adjudicator → Reviewer
+
+Besides the single tool-using agent, the app can run a **team of three agents** with separated duties (pick "Zespół agentów" on pages 1 and 2, or `--mode multi` in the evaluation):
+
+1. **Investigator** has the tools but is forbidden to decide. It returns an evidence dossier (`submit_findings`): facts with the tool each came from, a summary and open questions.
+2. **Adjudicator** has no tools. It decides only from the dossier and the policy (`submit_decision`), so it cannot invent evidence.
+3. **Reviewer** is a four-eyes check (`submit_review`): does the rule fit the facts, is every cited fact in the dossier, is a TRUE_MATCH based on more than the name, should missing data have forced ESCALATE, is the confidence justified. It either approves or sends the case back: missing evidence goes back to the Investigator, decision errors go back to the Adjudicator with the reviewer's comments.
+
+At most 2 revision rounds; if the Reviewer still does not approve, the case is escalated to a human. The trace shows which agent did each step, and the reviewer verdict and number of revisions are stored in the audit log.
+
 ## Evaluation harness
 
 `app/evaluation.py` (or the **5 · Ewaluacja** page) runs the agent on a fixed, stratified sample of alerts with known ground truth: 8 true matches, 12 lookalikes (same name, different person) and 4 coincidental hits, always with seed 42, so every agent version is scored on the same alerts. The run never writes to the audit log and disables `get_past_decisions`, so results don't depend on earlier decisions.
@@ -46,6 +56,7 @@ Each alert gets two labels: ground truth (is this person really sanctioned) and 
 
 ```
 python app/evaluation.py --n 24 --model claude-haiku-5-5 --mode tools    # tool-using agent
+python app/evaluation.py --n 24 --model claude-haiku-5-5 --mode multi    # investigator → adjudicator → reviewer
 python app/evaluation.py --n 24 --model claude-haiku-5-5 --mode single   # single-call baseline
 ```
 

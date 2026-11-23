@@ -100,6 +100,7 @@ def run_eval(n=24, model=A.MODEL, mode="tools", note="", progress=None):
                 "expected": a["expected"], "policy_expected": a["policy_expected"],
                 "decision": out["decision"], "rule": out.get("rule"), "confidence": out.get("confidence"),
                 "auto_escalated": bool(out.get("auto_escalated")),
+                "review": (out.get("review") or {}).get("verdict", ""), "revisions": out.get("revisions", 0),
                 "rationale": out.get("rationale"), "steps": u.get("steps", 0), "api_calls": u.get("api_calls", 0),
                 "tools_used": " → ".join(t["tool"] for t in out.get("trace", [])),
                 "input_tokens": u.get("input_tokens", 0), "output_tokens": u.get("output_tokens", 0),
@@ -152,7 +153,8 @@ def markdown_table(runs):
             elif c == "avg_cost_usd":
                 v = f"${float(v):.4f}"
             elif c == "mode":
-                v = "tool-use agent" if v == "tools" else "single call"
+                v = {"tools": "tool-use agent", "multi": "multi-agent (investigator → adjudicator → reviewer)",
+                     "single": "single call"}.get(v, v)
             vals.append(str(v))
         body += "| " + " | ".join(vals) + " |\n"
     return head + body

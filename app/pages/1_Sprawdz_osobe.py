@@ -6,15 +6,18 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # żeby zaimportować app/iris_agent.py
-from iris_agent import (MODEL, CONFIDENCE_THRESHOLD, SANCTIONS_POLICY, policy_version, LOG, ICONS,
+from iris_agent import (MODES, CONFIDENCE_THRESHOLD, SANCTIONS_POLICY, policy_version, LOG, ICONS,
                         screen, append_audit, investigate_customer, audit_fields, render_trace, render_factors)
 
 POLICY_VERSION = policy_version(SANCTIONS_POLICY)
 
 
-def ask_agent(name, dob, country, hit):
-    """Agent z narzędziami: sam zbiera dowody (wpis SDN, porównanie dat, wcześniejsze decyzje) i decyduje."""
-    return investigate_customer(name, dob, country, hit)
+AGENT_MODES = ["tools", "multi"]
+
+
+def ask_agent(name, dob, country, hit, mode="tools"):
+    """mode="tools": jeden agent z narzędziami. mode="multi": Śledczy -> Decydent -> Recenzent."""
+    return investigate_customer(name, dob, country, hit, mode=mode)
 
 
 st.title("Sprawdź osobę na liście sankcyjnej OFAC")
@@ -26,6 +29,8 @@ with tab1:
     dob = c1.text_input("Data urodzenia (opcjonalnie)", placeholder="np. 07 Oct 1952")
     country = c2.text_input("Obywatelstwo (opcjonalnie)", placeholder="np. Russia")
     use_agent = st.checkbox("Zapytaj agenta AI o decyzję (max 3 najlepsze trafienia)")
+    mode = st.radio("Tryb agenta", AGENT_MODES, format_func=MODES.get, horizontal=True,
+                    help="Zespół agentów jest dokładniejszy (recenzent sprawdza decyzję), ale robi ok. 2× więcej zapytań.")
 
     if st.button("Sprawdź") and name:
         res = screen(name)
@@ -33,7 +38,7 @@ with tab1:
         if use_agent and not res.empty:
             for _, hit in res.head(3).iterrows():
                 with st.spinner(f"Agent analizuje: {hit['matched_name']}..."):
-                    decisions.append((hit.to_dict(), ask_agent(name, dob, country, hit)))
+                    decisions.append((hit.to_dict(), ask_agent(name, dob, country, hit, mode)))
         st.session_state["last"] = {"name": name, "dob": dob, "country": country,
                                     "res": res, "decisions": decisions}
 
