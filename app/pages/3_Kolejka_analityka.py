@@ -1,15 +1,11 @@
+import sys
 from pathlib import Path
 import json, hashlib
 import pandas as pd
 import streamlit as st
 
-ROOT = Path(__file__).parent.parent.parent
-LOG = ROOT / "data" / "processed" / "audit_log.jsonl"
-
-def read_log():
-    if not LOG.exists():
-        return []
-    return [json.loads(l) for l in LOG.read_text().splitlines() if l.strip()]
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from iris_agent import read_log
 
 def verify_chain(rows):
     """Sprawdza łańcuch hashy. Zwraca (ok, numer_złego_wpisu, powód)."""

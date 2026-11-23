@@ -1,93 +1,19 @@
+import sys
 from pathlib import Path
 from datetime import datetime
-import json, hashlib
-import pandas as pd
 import streamlit as st
-import anthropic
-from dotenv import load_dotenv
-from rapidfuzz import process, fuzz, utils
 
-ROOT = Path(__file__).parent.parent.parent
-DATA = ROOT / "data" / "processed"
-LOG = DATA / "audit_log.jsonl"
-load_dotenv(ROOT / ".env")
-client = anthropic.Anthropic()
-POLICY = (ROOT / "policy" / "payment_policy.md").read_text()
-SYSTEM = f"""Jesteś analitykiem compliance w banku. Rozstrzygasz alerty z screeningu PŁATNOŚCI WYŁĄCZNIE według poniższej polityki.
+sys.path.insert(0, str(Path(__file__).parent.parent))  # żeby zaimportować app/iris_agent.py
+from iris_agent import (PAYMENT_POLICY, HIGH_RISK, policy_version, ICONS, screen, append_audit,
+                        investigate_payment, audit_fields, render_trace, render_factors)
 
-{POLICY}
+POLICY_VERSION = policy_version(PAYMENT_POLICY)
 
-Odpowiedz tylko JSON-em:
-{{"decision": "TRUE_MATCH|FALSE_POSITIVE|ESCALATE", "rule": "P?", "rationale": "...", "confidence": 0.0-1.0,
-  "factors": [{{"factor": "beneficiary_name|ordering_party_name|country|bank|payment_purpose", "client": "...", "sdn": "...", "result": "MATCH|MISMATCH|PARTIAL|UNKNOWN", "rule": "P?"}}]}}
-W "factors" oceń osobno każdy czynnik: beneficiary_name, ordering_party_name, country, bank, payment_purpose. W polu "client" podaj dane z przelewu, w polu "sdn" dane z listy (lub informację o kraju objętym sankcjami)."""
-
-MODEL = "claude-haiku-5-5"
-CONFIDENCE_THRESHOLD = 0.8
-POLICY_VERSION = hashlib.sha256(POLICY.encode()).hexdigest()[:12]
-
-# Kraje wysokiego ryzyka (uproszczenie: mała, ręcznie wpisana lista)
-HIGH_RISK = {"iran", "north korea", "korea, north", "dprk", "syria", "cuba", "russia", "belarus", "crimea",
-             "korea północna", "kuba", "rosja", "białoruś", "krym"}
-
-@st.cache_data
-def load():
-    return pd.read_csv(DATA / "names.csv"), pd.read_csv(DATA / "people.csv")
-
-names, people = load()
-
-def screen(query, threshold=85):
-    hits = process.extract(query, names["name"], scorer=fuzz.token_set_ratio,
-                           processor=utils.default_process, score_cutoff=threshold, limit=None)
-    rows = [{"sdn_id": names.loc[idx, "id"], "matched_name": m, "score": round(s)} for m, s, idx in hits]
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("score", ascending=False).drop_duplicates("sdn_id")
-    return df.merge(people[["id", "dob", "nationality", "program"]],
-                    left_on="sdn_id", right_on="id", how="left").drop(columns="id")
 
 def ask_agent(p, hits, country_flag):
-    lines = [f"PRZELEW: zleceniodawca: {p['ordering']}; beneficjent: {p['beneficiary']}; kraj beneficjenta: {p['country'] or 'brak danych'}; "
-             f"bank beneficjenta: {p['bank'] or 'brak danych'}; kwota: {p['amount']} {p['currency']}; tytuł: {p['title'] or 'brak danych'}",
-             f"Kraj beneficjenta na liście krajów wysokiego ryzyka: {'TAK' if country_flag else 'NIE'}"]
-    if hits:
-        for h in hits:
-            lines.append(f"TRAFIENIE SDN ({h['party']}): {h['matched_name']}; obywatelstwo: {h['nationality']}; "
-                         f"data ur.: {h['dob']}; program: {h['program']}; podobieństwo nazwiska: {h['score']}")
-    else:
-        lines.append("Brak trafień nazwisk na liście SDN.")
-    r = client.messages.create(model=MODEL, max_tokens=1500, system=SYSTEM,
-                               messages=[{"role": "user", "content": "\n".join(lines)}])
-    t = next(b.text for b in r.content if b.type == "text")
-    out = json.loads(t[t.find("{"):t.rfind("}") + 1])
-    if not isinstance(out.get("factors"), list):
-        out["factors"] = []
-    conf = float(out.get("confidence") or 0)
-    if out["decision"] != "ESCALATE" and conf < CONFIDENCE_THRESHOLD:
-        out["rationale"] = (f"[Auto-eskalacja: pewność {conf} < {CONFIDENCE_THRESHOLD}, "
-                            f"agent proponował {out['decision']}] " + str(out.get("rationale", "")))
-        out["decision"] = "ESCALATE"
-        out["auto_escalated"] = True
-    if country_flag and out["decision"] == "FALSE_POSITIVE":
-        out["rationale"] = "[Auto-eskalacja: kraj wysokiego ryzyka (P4)] " + str(out.get("rationale", ""))
-        out["decision"] = "ESCALATE"
-        out["auto_escalated"] = True
-    return out
+    """Agent z narzędziami: sprawdza kraj, kod BIC banku, wpisy SDN i wcześniejsze decyzje, potem decyduje."""
+    return investigate_payment(p, hits, country_flag)
 
-def append_audit(entry):
-    prev = "0" * 64
-    if LOG.exists():
-        lines = LOG.read_text().strip().splitlines()
-        if lines:
-            prev = json.loads(lines[-1])["hash"]
-    entry["prev_hash"] = prev
-    text = json.dumps(entry, sort_keys=True, ensure_ascii=False)
-    entry["hash"] = hashlib.sha256(text.encode()).hexdigest()
-    with open(LOG, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-ICONS = {"TRUE_MATCH": "🚨", "FALSE_POSITIVE": "✅", "ESCALATE": "🟡"}
-FACTOR_ICONS = {"MATCH": "✅ MATCH", "MISMATCH": "❌ MISMATCH", "PARTIAL": "🟠 PARTIAL", "UNKNOWN": "❔ UNKNOWN"}
 
 # Przykładowe przelewy do demo (jedno kliknięcie)
 SAMPLES = {
@@ -167,17 +93,9 @@ if last:
             else:
                 st.subheader(f"{ICONS.get(out['decision'], '❔')} {out['decision']}")
                 st.write(f"**Reguła:** {out.get('rule')} · **Pewność:** {out.get('confidence')}")
-                factors = [f for f in out.get("factors", []) if isinstance(f, dict)]
-                if factors:
-                    st.markdown("**Ocena czynników**")
-                    st.dataframe(pd.DataFrame([{
-                        "Czynnik": f.get("factor", ""),
-                        "Przelew": str(f.get("client", "")),
-                        "Lista SDN": str(f.get("sdn", "")),
-                        "Wynik": FACTOR_ICONS.get(str(f.get("result", "")).upper(), "❔ " + str(f.get("result", ""))),
-                        "Reguła": f.get("rule", ""),
-                    } for f in factors]), hide_index=True, width="stretch")
+                render_factors(out, client_label="Przelew")
                 st.write(out.get("rationale"))
+                render_trace(out)
 
                 with st.form("pay_review"):
                     st.markdown("**Przegląd analityka**")
@@ -202,18 +120,11 @@ if last:
                             "high_risk_country": flag,
                             "sdn_id": int(top["sdn_id"]) if top else None,
                             "sdn_name": top.get("matched_name"),
-                            "agent_decision": out["decision"],
-                            "agent_rule": out.get("rule"),
-                            "agent_confidence": float(out.get("confidence") or 0),
-                            "agent_rationale": out.get("rationale"),
-                            "auto_escalated": bool(out.get("auto_escalated")),
-                            "factors": out.get("factors", []),
+                            **audit_fields(out),
                             "final_decision": final,
                             "overridden": final != out["decision"],
                             "reviewer": reviewer,
                             "comment": comment,
-                            "model": MODEL,
                             "policy_version": POLICY_VERSION,
-                            "confidence_threshold": CONFIDENCE_THRESHOLD,
                         })
                         st.success(f"Zapisano w audit logu: {final}")
