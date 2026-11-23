@@ -38,6 +38,21 @@ In the app the agent is not a single prompt. `app/iris_agent.py` runs an Anthrop
 
 Guardrails around the loop: max 8 rounds, unknown tools / tool errors are returned to the model as errors, a missing or malformed decision becomes ESCALATE, and the confidence threshold and high-risk-country rule are enforced in code after the model decides. Every step (tool, arguments, result) plus token usage and cost is shown in the UI as an investigation trace and stored in the hash-chained audit log.
 
+## Evaluation harness
+
+`app/evaluation.py` (or the **5 · Ewaluacja** page) runs the agent on a fixed, stratified sample of alerts with known ground truth: 8 true matches, 12 lookalikes (same name, different person) and 4 coincidental hits, always with seed 42, so every agent version is scored on the same alerts. The run never writes to the audit log and disables `get_past_decisions`, so results don't depend on earlier decisions.
+
+Each alert gets two labels: ground truth (is this person really sanctioned) and the **policy-expected** outcome, computed deterministically from rules R1–R8 without an LLM. Metrics per run: missed true matches (must be 0), true matches blocked, false positives auto-closed (alert reduction), wrong blocks, escalation rate, policy accuracy, average steps, latency and cost per alert. Every run is stored in `eval/runs.csv` together with model, mode, prompt-version hash and policy-version hash, and per-alert results with full traces in `eval/results/`, so prompt, model and architecture changes can be compared side by side.
+
+```
+python app/evaluation.py --n 24 --model claude-haiku-5-5 --mode tools    # tool-using agent
+python app/evaluation.py --n 24 --model claude-haiku-5-5 --mode single   # single-call baseline
+```
+
+<!-- EVAL_TABLE -->
+_Results table: run the evaluation, then paste the table from the Ewaluacja page here._
+<!-- /EVAL_TABLE -->
+
 ## Interactive app (Streamlit)
 
 `streamlit run app/dashboard.py` opens a multi-page app:
@@ -48,6 +63,8 @@ Guardrails around the loop: max 8 rounds, unknown tools / tool errors are return
 | **1 · Sprawdź osobę** | Screen one person (or a CSV batch) against OFAC SDN. The agent adjudicates each hit; old system vs. Mini-Iris shown side by side. Batch mode runs the agent on up to 20 rows and writes every decision to the audit log. |
 | **2 · Płatności** | Separate **payment screening agent** with its own policy (`policy/payment_policy.md`, rules P1–P6): screens beneficiary and ordering party, flags high-risk countries, three one-click demo payments. |
 | **3 · Kolejka analityka** | Analyst queue of open ESCALATE cases, ops metrics (decisions by type, human override rate, auto-escalations) and a live **audit-chain verification** button. |
+| **4 · Reguły** | Plain-language explanation of the flow, policies and limits. |
+| **5 · Ewaluacja** | Run the evaluation harness (model, mode, sample size, cost estimate), compare runs, inspect confusion matrices and the trace of any alert. |
 
 Key controls:
 

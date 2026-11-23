@@ -190,8 +190,11 @@ def tool_lookup_bic(bank):
             "bank_country_high_risk": country.lower() in HIGH_RISK}
 
 
+PAST_DECISIONS_ENABLED = True  # ewaluacja wyłącza, żeby wynik nie zależał od zawartości audit logu
+
+
 def tool_get_past_decisions(sdn_id=None, name=None, limit=5):
-    rows = read_log()
+    rows = read_log() if PAST_DECISIONS_ENABLED else []
     out = []
     for r in reversed(rows):
         hit = False
@@ -428,14 +431,38 @@ def finalize(final, trace, usage, stop, high_risk=False):
     return out
 
 
-def investigate_customer(name, dob, country, hit, customer_id=None, model=MODEL):
-    """Alert klienta: dane klienta + trafienie ze screeningu. Resztę agent zbiera sam."""
+SYSTEM_SINGLE = f"""Jesteś analitykiem compliance w banku. Rozstrzygasz alert sankcyjny dotyczący KLIENTA wyłącznie według polityki banku.
+Wszystkie dane masz w treści alertu (nie masz innych narzędzi). Od razu wywołaj submit_decision.
+W "factors" oceń osobno: name, dob, nationality, passport (brak danych po którejkolwiek stronie = UNKNOWN).
+
+POLITYKA BANKU:
+{SANCTIONS_POLICY}"""
+
+# Tryby agenta (do porównań w ewaluacji)
+MODES = {"tools": "Agent z narzędziami (wiele kroków)", "single": "Jedno zapytanie (bez narzędzi, baseline)"}
+
+
+def prompt_version(mode="tools"):
+    """Hash promptu systemowego + opisów narzędzi: zmienia się, gdy zmienisz prompt albo narzędzia."""
+    text = (SYSTEM_CUSTOMER + json.dumps(tools_for(CUSTOMER_TOOLS), sort_keys=True)) if mode == "tools" else SYSTEM_SINGLE
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def investigate_customer(name, dob, country, hit, customer_id=None, model=MODEL, mode="tools"):
+    """Alert klienta: dane klienta + trafienie ze screeningu. Resztę agent zbiera sam.
+    mode="single": baseline bez narzędzi - wszystkie dane od razu w treści, jedno wywołanie modelu."""
     case = (f"ALERT SANKCYJNY (klient)\n"
             f"Klient: {name}; data ur.: {dob or 'brak danych'}; obywatelstwo: {country or 'brak danych'}; paszport: brak danych"
             + (f"; customer_id: {customer_id}" if customer_id else "") + "\n"
             f"Trafienie screeningu: sdn_id={int(hit['sdn_id'])}, nazwa na liście: {hit['matched_name']}, "
-            f"podobieństwo nazwiska: {hit['score']}\n"
-            "Przeprowadź dochodzenie i rozstrzygnij alert.")
+            f"podobieństwo nazwiska: {hit['score']}\n")
+    if mode == "single":
+        sdn = tool_get_sdn_entry(hit["sdn_id"])
+        case += (f"Wpis SDN: data ur.: {sdn.get('dob') or 'brak danych'}; obywatelstwo: {sdn.get('nationality') or 'brak danych'}; "
+                 f"paszport: {sdn.get('passport') or 'brak danych'}; program: {sdn.get('program')}\n"
+                 "Rozstrzygnij alert.")
+        return finalize(*run_agent(SYSTEM_SINGLE, case, [], model=model, max_steps=2))
+    case += "Przeprowadź dochodzenie i rozstrzygnij alert."
     return finalize(*run_agent(SYSTEM_CUSTOMER, case, CUSTOMER_TOOLS, model=model))
 
 
