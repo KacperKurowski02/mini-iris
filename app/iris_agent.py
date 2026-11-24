@@ -87,10 +87,37 @@ def screen(query, threshold=SCREENING_THRESHOLD):
                     left_on="sdn_id", right_on="id", how="left").drop(columns="id")
 
 
-def read_log():
+def read_log(raw=False):
+    """Wpisy audit logu. raw=True: dokładnie tak, jak zapisano (do weryfikacji łańcucha hashy).
+    Domyślnie starsze wpisy (z notebooka 05, pole "decision") są uzupełniane w pamięci o
+    final_decision / agent_decision. Plik nigdy nie jest przepisywany, więc łańcuch hashy zostaje ważny."""
     if not LOG.exists():
         return []
-    return [json.loads(l) for l in LOG.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in LOG.read_text().splitlines() if l.strip()]
+    if raw:
+        return rows
+    legacy = [r for r in rows if r.get("decision") is not None and r.get("final_decision") is None]
+    if legacy:
+        _, _, customers = load_data()
+        cust = customers.set_index("customer_id").to_dict("index")
+        alerts = pd.read_csv(DATA / "alerts.csv").drop_duplicates("customer_id").set_index("customer_id").to_dict("index")
+    for r in legacy:
+        r["final_decision"] = r["decision"]
+        for new, old in (("agent_decision", "decision"), ("agent_rule", "rule"),
+                         ("agent_confidence", "confidence"), ("agent_rationale", "rationale")):
+            if r.get(new) is None and r.get(old) is not None:
+                r[new] = r[old]
+        c, a = cust.get(r.get("customer_id"), {}), alerts.get(r.get("customer_id"), {})
+        r.setdefault("customer_name", c.get("name"))
+        r.setdefault("customer_dob", c.get("dob"))
+        r.setdefault("customer_country", c.get("nationality"))
+        if a:
+            r.setdefault("sdn_id", int(a["sdn_id"]))
+            r.setdefault("sdn_name", a.get("matched_name"))
+        r.setdefault("reviewer", "auto")
+        r.setdefault("alert_type", "customer")
+        r["legacy_entry"] = True
+    return rows
 
 
 def append_audit(entry):

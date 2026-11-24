@@ -48,6 +48,12 @@ flowchart LR
 
 ## Screenshots
 
+![Dashboard with the latest evaluation results](docs/img/dashboard.png)
+*Dashboard: screening funnel, latest evaluation results, comparison of agent architectures and estimated analyst workload saved.*
+
+![Analyst queue and operational metrics](docs/img/analyst_queue.png)
+*Analyst queue: operational metrics, open ESCALATE cases and the resolve form that feeds the analyst feedback loop.*
+
 ![Evaluation page comparing agent architectures](docs/img/evaluation.png)
 *Evaluation page: run history across agent architectures, per-run metrics and confusion matrices against ground truth and policy.*
 

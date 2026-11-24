@@ -141,7 +141,7 @@ else:
 st.subheader("🔒 Integralność audit logu")
 st.write("Każdy wpis zawiera hash poprzedniego wpisu. Zmiana lub usunięcie dowolnego wpisu przerywa łańcuch.")
 if st.button("Zweryfikuj łańcuch hashy"):
-    ok, bad, why = verify_chain(rows)
+    ok, bad, why = verify_chain(read_log(raw=True))
     if ok:
         st.success(f"✅ Łańcuch nienaruszony: {len(rows)} wpisów zweryfikowanych")
     else:
