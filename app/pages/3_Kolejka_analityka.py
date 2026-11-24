@@ -43,7 +43,7 @@ res_final = dict(zip(resolutions["resolves"], resolutions["final_decision"]))
 df = all_df[~is_res].copy()
 df["resolved_by_analyst"] = df["hash"].isin(res_final.keys())
 df.loc[df["resolved_by_analyst"], "overridden"] = True
-df["final_decision"] = df["hash"].map(res_final).fillna(df["final_decision"])
+df.loc[df["resolved_by_analyst"], "final_decision"] = df.loc[df["resolved_by_analyst"], "hash"].map(res_final)
 auto_esc = df["auto_escalated"].astype(bool) | df["agent_rationale"].astype(str).str.startswith("[Auto-eskalacja")
 
 # --- Metryki ---
