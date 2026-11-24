@@ -1,0 +1,6 @@
+pandas
+rapidfuzz
+faker
+anthropic
+python-dotenv
+streamlit

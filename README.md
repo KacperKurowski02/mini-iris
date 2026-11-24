@@ -2,15 +2,49 @@
 
 End-to-end prototype of an AI agent that resolves sanctions-screening alerts against a written bank policy, inspired by Silent Eight's Iris.
 
-## Results (sample of 21 alerts, Claude Haiku)
+**Sanctions screening produces thousands of alerts, and over 90% of them are false positives.** Mini-Iris is an agentic system that investigates each alert the way an analyst would, decides against the bank's written policy, explains why, escalates what it is unsure about, learns from analysts' decisions and records everything in a tamper-evident audit log.
 
-| Metric | Value |
+## Headline results
+
+Stratified evaluation set of 24 alerts with known ground truth (8 real sanctioned persons, 12 lookalikes, 4 coincidental hits), Claude Haiku 5.5, tool-using agent:
+
+| | |
 |---|---|
-| Accuracy vs. ground truth | **95%** |
-| False positives auto-closed | **15 / 16 (94%)** |
-| True matches missed | **0** |
-| Escalated to human | 1 |
-| Avg. time per decision | **3.2 s** |
+| Sanctioned persons let through | **0 / 8** |
+| Sanctioned persons blocked automatically | **8 / 8** |
+| False positives closed without a human | **14 / 16 (88%)** |
+| Agreement with the written policy | **100%** |
+| Escalated to a human | 8% |
+| Cost / latency per alert | **$0.001 / 7 s** |
+
+Full comparison of three agent architectures is in [Evaluation harness](#evaluation-harness).
+
+## What's inside
+
+- **Tool-using agent** (Anthropic tool-use loop, 7 investigation tools, max 8 rounds) with code-enforced guardrails: confidence threshold, high-risk-country rule, malformed output → escalate.
+- **Multi-agent mode**: Investigator → Adjudicator → Reviewer with separation of duties and a four-eyes revision loop.
+- **Evaluation harness**: fixed stratified sample, deterministic policy oracle, metrics where *missed sanctioned person* is the hard constraint, run history with prompt/policy version hashes. It caught a real bug (see below).
+- **Analyst feedback loop**: analysts resolve the escalation queue; their decisions are retrieved as precedents for similar future alerts.
+- **Compliance-grade audit trail**: SHA-256 hash chain over every decision, including the full investigation trace, model, policy version and cost.
+- **Two screening flows**: customers (KYC) and payments (with its own policy, BIC country lookup and high-risk jurisdictions).
+
+Stack: Python, pandas, RapidFuzz, Anthropic API (Claude Haiku 5.5), Streamlit, OFAC SDN data.
+
+```mermaid
+flowchart LR
+    A[Customer / payment] --> B[Fuzzy screening<br/>vs OFAC SDN]
+    B -- no hit --> P[Pass]
+    B -- alert --> C[Retrieve similar<br/>analyst decisions]
+    C --> D{Agent}
+    D -- tools --> T[SDN entry · KYC · DOB compare<br/>country risk · BIC · past decisions]
+    T --> D
+    D --> G[Guardrails<br/>confidence ≥ 0.8, high-risk country]
+    G -- FALSE_POSITIVE --> F[Auto-close]
+    G -- TRUE_MATCH --> M[Block · MLRO]
+    G -- ESCALATE --> Q[Analyst queue]
+    Q -- decision + reason --> C
+    F & M & Q --> L[(Hash-chained<br/>audit log)]
+```
 
 ## Pipeline
 
@@ -110,12 +144,20 @@ Key controls:
 - **Explainability.** Every decision carries a rationale and evidence, as regulators require.
 
 ## Run it
-pip install pandas rapidfuzz faker anthropic python-dotenv streamlit
-1. Download SDN.CSV, ALT.CSV, ADD.CSV from OFAC into `data/raw/`
+
+```
+pip install -r requirements.txt
+```
+
+1. Download `SDN.CSV`, `ALT.CSV`, `ADD.CSV` from OFAC into `data/raw/`
 2. Add `ANTHROPIC_API_KEY=...` to a `.env` file in the repo root
-3. Run notebooks 01 → 05 in order
+3. Run notebooks `notebooks/01` → `05` in order (they build `data/processed/`)
 4. `streamlit run app/dashboard.py` and open the pages in the sidebar
+5. Optional: `python app/evaluation.py --n 24 --mode tools` (about $0.03 with Haiku)
 
-## Limitations
+## Limitations and next steps
 
-Synthetic customers; small LLM sample (cost-bounded); single-attribute fuzzy matching. Next steps: larger evaluation, model comparison (Haiku vs. Sonnet), transliteration-aware matching.
+- Customers are synthetic and the evaluation set is small (24 alerts, cost-bounded); the numbers show the method, not production accuracy.
+- Name matching is single-attribute fuzzy matching; transliteration-aware matching (Arabic/Cyrillic) would cut false positives at the source.
+- Feedback retrieval uses a hand-tuned, explainable similarity score; with more analyst decisions it could be replaced by embeddings and evaluated with a held-out set.
+- Next: larger evaluation, model comparison (Haiku vs. Sonnet) on the same harness, and measuring whether analyst precedents improve the escalation rate.
