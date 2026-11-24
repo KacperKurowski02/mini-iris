@@ -81,6 +81,7 @@ def compute_metrics(r):
 def run_eval(n=24, model=A.MODEL, mode="tools", note="", progress=None):
     sample = build_sample(n)
     A.PAST_DECISIONS_ENABLED = False
+    A.FEEDBACK_ENABLED = False
     rows = []
     try:
         for i, a in enumerate(sample.to_dict("records")):
@@ -112,6 +113,7 @@ def run_eval(n=24, model=A.MODEL, mode="tools", note="", progress=None):
                 progress(i + 1, len(sample), a["customer_name"], out["decision"])
     finally:
         A.PAST_DECISIONS_ENABLED = True
+        A.FEEDBACK_ENABLED = True
 
     r = pd.DataFrame(rows)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + f"_{mode}_{model.replace('claude-', '')}"

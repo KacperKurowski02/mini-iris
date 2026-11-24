@@ -48,9 +48,17 @@ Besides the single tool-using agent, the app can run a **team of three agents** 
 
 At most 2 revision rounds; if the Reviewer still does not approve, the case is escalated to a human. The trace shows which agent did each step, and the reviewer verdict and number of revisions are stored in the audit log.
 
+## Analyst feedback loop (learning from human decisions)
+
+Escalated cases don't just end in a queue. On **3 · Kolejka analityka** the analyst resolves each ESCALATE case (FALSE_POSITIVE or TRUE_MATCH) and must write a short reason. The resolution is appended to the hash-chained audit log as a new `analyst_resolution` entry that points at the original case (`resolves` = its hash), so nothing is ever overwritten.
+
+Every human decision with a reason (queue resolutions, overrides and commented reviews on pages 1–2) becomes a **feedback example**. Before each investigation, `find_similar_examples()` scores past examples against the new alert with a simple, explainable similarity (same SDN entry 0.5, similar name up to 0.3, same country 0.1, same alert type 0.1; threshold 0.45) and injects the top 3 into the case text, clearly labelled as guidance rather than evidence. The UI shows which examples the agent received and the audit log stores their ids (`agent_examples`), so every decision can be traced back to the human precedents it saw. No fine-tuning: this is retrieval of precedents, so a wrong example can be fixed simply by a new analyst decision.
+
+The evaluation harness switches feedback off, so scores stay reproducible and don't depend on what is in the log.
+
 ## Evaluation harness
 
-`app/evaluation.py` (or the **5 · Ewaluacja** page) runs the agent on a fixed, stratified sample of alerts with known ground truth: 8 true matches, 12 lookalikes (same name, different person) and 4 coincidental hits, always with seed 42, so every agent version is scored on the same alerts. The run never writes to the audit log and disables `get_past_decisions`, so results don't depend on earlier decisions.
+`app/evaluation.py` (or the **5 · Ewaluacja** page) runs the agent on a fixed, stratified sample of alerts with known ground truth: 8 true matches, 12 lookalikes (same name, different person) and 4 coincidental hits, always with seed 42, so every agent version is scored on the same alerts. The run never writes to the audit log and disables `get_past_decisions` and the analyst-feedback examples, so results don't depend on earlier decisions.
 
 Each alert gets two labels: ground truth (is this person really sanctioned) and the **policy-expected** outcome, computed deterministically from rules R1–R8 without an LLM. Metrics per run: missed true matches (must be 0), true matches blocked, false positives auto-closed (alert reduction), wrong blocks, escalation rate, policy accuracy, average steps, latency and cost per alert. Every run is stored in `eval/runs.csv` together with model, mode, prompt-version hash and policy-version hash, and per-alert results with full traces in `eval/results/`, so prompt, model and architecture changes can be compared side by side.
 
@@ -61,7 +69,16 @@ python app/evaluation.py --n 24 --model claude-haiku-5-5 --mode single   # singl
 ```
 
 <!-- EVAL_TABLE -->
-_Results table: run the evaluation, then paste the table from the Ewaluacja page here._
+Same 24 stratified alerts (seed 42), Claude Haiku 5.5, after the confidence-parsing fix (`eval/runs.csv`, notes ending in "v2"):
+
+| Model | Mode | Alerts | Missed true matches | True matches blocked | FPs auto-closed | Wrong blocks | Escalation rate | Policy accuracy | Avg steps | Avg s / alert | Avg $ / alert |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| claude-haiku-5-5 | tool-use agent | 24 | 0 | 8/8 | 14/16 | 0 | 8% | 100% | 4.9 | 7.0 | $0.0011 |
+| claude-haiku-5-5 | multi-agent (investigator → adjudicator → reviewer) | 24 | 0 | 7/8 | 13/16 | 0 | 17% | 92% | 8.0 | 22.6 | $0.0035 |
+| claude-haiku-5-5 | single call | 24 | 0 | 8/8 | 14/16 | 0 | 8% | 100% | 1.0 | 5.0 | $0.0006 |
+
+
+What this shows: no setup let a sanctioned person through. On this sample the single-call baseline ties the tool-using agent, because every fact the policy needs (DOB, nationality) is already in the alert, so tools add cost but no accuracy here; their value is on alerts where data must be looked up (KYC record, aliases, BIC country) and in the auditable trace. The multi-agent team was the most cautious: it escalated one true match it could have blocked and cost about 3× more, a trade-off that only pays off where a four-eyes check is required. The first runs (v1) exposed a parsing bug in which the model wrote its confidence inside the rationale; the fix raised tool-agent policy accuracy from 83% to 100%, which is exactly what the harness is for.
 <!-- /EVAL_TABLE -->
 
 ## Interactive app (Streamlit)
@@ -73,7 +90,7 @@ _Results table: run the evaluation, then paste the table from the Ewaluacja page
 | **Dashboard** | Screening funnel, agent accuracy, confusion matrix on the evaluation sample. |
 | **1 · Sprawdź osobę** | Screen one person (or a CSV batch) against OFAC SDN. The agent adjudicates each hit; old system vs. Mini-Iris shown side by side. Batch mode runs the agent on up to 20 rows and writes every decision to the audit log. |
 | **2 · Płatności** | Separate **payment screening agent** with its own policy (`policy/payment_policy.md`, rules P1–P6): screens beneficiary and ordering party, flags high-risk countries, three one-click demo payments. |
-| **3 · Kolejka analityka** | Analyst queue of open ESCALATE cases, ops metrics (decisions by type, human override rate, auto-escalations) and a live **audit-chain verification** button. |
+| **3 · Kolejka analityka** | Analyst queue of open ESCALATE cases with a **resolve form** (decision + required reason, feeds the example base), a table of feedback examples, ops metrics (decisions by type, human override rate, auto-escalations) and a live **audit-chain verification** button. |
 | **4 · Reguły** | Plain-language explanation of the flow, policies and limits. |
 | **5 · Ewaluacja** | Run the evaluation harness (model, mode, sample size, cost estimate), compare runs, inspect confusion matrices and the trace of any alert. |
 

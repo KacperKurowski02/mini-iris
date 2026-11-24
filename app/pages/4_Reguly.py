@@ -8,7 +8,7 @@ POLICY_DIR = ROOT / "policy"
 # Te same wartości, których używa agent (jedno źródło: app/iris_agent.py)
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from iris_agent import SCREENING_THRESHOLD, CONFIDENCE_THRESHOLD, HIGH_RISK_COUNTRIES, MAX_STEPS
+from iris_agent import SCREENING_THRESHOLD, CONFIDENCE_THRESHOLD, HIGH_RISK_COUNTRIES, MAX_STEPS, FEEDBACK_K
 
 def read_policy(name):
     path = POLICY_DIR / name
@@ -66,8 +66,14 @@ st.markdown(f"""
    się nie zgadza, sprawa idzie do człowieka.
 5. **Bezpiecznik pewności.** Jeśli agent mówi „to nie on” albo „to on”, ale jego pewność jest niższa niż
    **{CONFIDENCE_THRESHOLD}**, system sam zmienia decyzję na **ESCALATE**. Niepewna AI nie może sama zamknąć sprawy.
-6. **Kolejka analityka.** Wszystkie ESCALATE trafiają do człowieka (strona *Kolejka analityka*). Analityk może
-   też zmienić decyzję agenta; to jest zapisywane i liczone w metrykach.
+6. **Kolejka analityka.** Wszystkie ESCALATE trafiają do człowieka (strona *Kolejka analityka*). Analityk rozstrzyga
+   sprawę z kolejki (FALSE_POSITIVE albo TRUE_MATCH) i musi napisać krótko dlaczego. Może też zmienić decyzję agenta
+   na stronach 1 i 2; to jest zapisywane i liczone w metrykach.
+   **Agent uczy się na decyzjach ludzi (pętla feedbacku).** Każda decyzja analityka z komentarzem trafia do
+   *bazy przykładów*. Przy nowym alercie system szuka do {FEEDBACK_K} najbardziej podobnych spraw (ten sam wpis z listy,
+   podobne nazwisko, ten sam kraj, ten sam typ alertu) i dokleja je do alertu: „w podobnej sprawie analityk zdecydował X,
+   bo…”. To wskazówka, a nie dowód: agent i tak musi sprawdzić fakty narzędziami i decydować według polityki.
+   Model nie jest trenowany od nowa; dostaje po prostu dobrze dobrane przykłady (tzw. *retrieval*).
 7. **Audit log.** Każda decyzja jest zapisywana w dzienniku, w którym każdy wpis zawiera „odcisk palca” (hash)
    poprzedniego. Jeśli ktoś po cichu zmieni lub usunie wpis, łańcuch się zerwie i strona *Kolejka analityka* to pokaże.
 """)

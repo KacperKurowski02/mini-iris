@@ -216,6 +216,92 @@ def tool_get_past_decisions(sdn_id=None, name=None, limit=5):
             "note": "Wcześniejsze decyzje to kontekst, nie dowód. Rozstrzygaj według polityki."}
 
 
+
+# ============================================================
+# PĘTLA FEEDBACKU: decyzje analityków jako przykłady dla agenta
+# ============================================================
+FEEDBACK_ENABLED = True   # ewaluacja wyłącza, żeby wynik był powtarzalny
+FEEDBACK_K = 3            # ile najbardziej podobnych przykładów dostaje agent
+FEEDBACK_MIN_SCORE = 0.45  # minimalne podobieństwo sprawy (0-1)
+
+
+def analyst_examples(rows=None):
+    """Sprawy rozstrzygnięte przez człowieka: rozwiązania z kolejki ESCALATE, korekty agenta,
+    decyzje z komentarzem analityka. Tylko ostateczne decyzje (TRUE_MATCH / FALSE_POSITIVE)."""
+    rows = read_log() if rows is None else rows
+    out = []
+    for r in rows:
+        if str(r.get("reviewer") or "auto") == "auto":
+            continue
+        if r.get("final_decision") not in ("TRUE_MATCH", "FALSE_POSITIVE"):
+            continue
+        if (r.get("alert_type") == "analyst_resolution" or r.get("overridden")
+                or str(r.get("comment") or "").strip()):
+            out.append(r)
+    return out
+
+
+def _same_id(a, b):
+    try:
+        return a is not None and b is not None and int(a) == int(b)
+    except (TypeError, ValueError):
+        return False
+
+
+def example_similarity(case, ex):
+    """Proste, wytłumaczalne podobieństwo dwóch spraw (0-1) + lista powodów."""
+    score, why = 0.0, []
+    if _same_id(case.get("sdn_id"), ex.get("sdn_id")):
+        score += 0.5
+        why.append("ten sam wpis SDN")
+    if case.get("name") and ex.get("customer_name"):
+        s = fuzz.token_set_ratio(str(case["name"]), str(ex["customer_name"]), processor=utils.default_process) / 100
+        if s >= 0.85:
+            score += 0.3 * s
+            why.append(f"podobne nazwisko ({s:.0%})")
+    c1, c2 = str(case.get("country") or "").strip().lower(), str(ex.get("customer_country") or "").strip().lower()
+    if c1 and c1 == c2:
+        score += 0.1
+        why.append("ten sam kraj")
+    ex_type = ex.get("resolved_alert_type") or ex.get("alert_type") or "customer"
+    if case.get("alert_type", "customer") == ex_type.replace("customer_batch", "customer"):
+        score += 0.1
+        why.append("ten sam typ alertu")
+    return round(score, 2), why
+
+
+def find_similar_examples(case, k=FEEDBACK_K, min_score=FEEDBACK_MIN_SCORE, rows=None):
+    """Retrieval: k najbardziej podobnych spraw rozstrzygniętych przez analityków."""
+    if not FEEDBACK_ENABLED:
+        return []
+    scored = []
+    for ex in analyst_examples(rows):
+        score, why = example_similarity(case, ex)
+        if score >= min_score:
+            scored.append((score, ex.get("timestamp") or "", ex, why))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [{"example_id": str(ex.get("hash", ""))[:10], "similarity": score, "why": why,
+             "timestamp": ex.get("timestamp"), "customer_name": ex.get("customer_name"),
+             "customer_dob": ex.get("customer_dob"), "customer_country": ex.get("customer_country"),
+             "sdn_id": ex.get("sdn_id"), "sdn_name": ex.get("sdn_name"),
+             "agent_decision": ex.get("agent_decision"), "final_decision": ex.get("final_decision"),
+             "reviewer": ex.get("reviewer"), "comment": ex.get("comment") or ""}
+            for score, _, ex, why in scored[:k]]
+
+
+def format_examples(examples):
+    if not examples:
+        return ""
+    lines = ["PRZYKŁADY Z DECYZJI ANALITYKÓW W PODOBNYCH SPRAWACH (wskazówka, jak bank stosuje politykę; "
+             "to NIE jest dowód w tej sprawie: fakty sprawdź narzędziami i rozstrzygaj według polityki):"]
+    for i, e in enumerate(examples, 1):
+        lines.append(f"{i}. [podobieństwo {e['similarity']}: {', '.join(e['why'])}] Klient: {e['customer_name']} "
+                     f"(ur. {e.get('customer_dob') or 'brak danych'}, kraj: {e.get('customer_country') or 'brak danych'}) "
+                     f"vs lista: {e.get('sdn_name') or 'brak'}. Agent: {e.get('agent_decision')} → analityk: "
+                     f"{e['final_decision']}. Komentarz analityka: \"{e['comment'] or 'brak'}\"")
+    return "\n".join(lines) + "\n"
+
+
 EXECUTORS = {
     "search_sdn": tool_search_sdn,
     "get_sdn_entry": tool_get_sdn_entry,
@@ -658,6 +744,15 @@ def investigate_customer(name, dob, country, hit, customer_id=None, model=MODEL,
             + (f"; customer_id: {customer_id}" if customer_id else "") + "\n"
             f"Trafienie screeningu: sdn_id={int(hit['sdn_id'])}, nazwa na liście: {hit['matched_name']}, "
             f"podobieństwo nazwiska: {hit['score']}\n")
+    examples = find_similar_examples({"alert_type": "customer", "name": name, "country": country,
+                                      "sdn_id": hit["sdn_id"]})
+    case += format_examples(examples)
+    out = _investigate_customer(case, hit, model, mode)
+    out["examples"] = examples
+    return out
+
+
+def _investigate_customer(case, hit, model, mode):
     if mode == "single":
         sdn = tool_get_sdn_entry(hit["sdn_id"])
         case += (f"Wpis SDN: data ur.: {sdn.get('dob') or 'brak danych'}; obywatelstwo: {sdn.get('nationality') or 'brak danych'}; "
@@ -683,6 +778,17 @@ def investigate_payment(p, hits, country_flag, model=MODEL, mode="tools"):
                          f"podobieństwo {h['score']}")
     else:
         lines.append("Screening nazwisk: brak trafień na liście SDN.")
+    top = max(hits, key=lambda h: h["score"]) if hits else None
+    examples = find_similar_examples({"alert_type": "payment", "name": p["beneficiary"], "country": p["country"],
+                                      "sdn_id": top["sdn_id"] if top else None})
+    if examples:
+        lines.append(format_examples(examples).rstrip())
+    out = _investigate_payment(lines, country_flag, model, mode)
+    out["examples"] = examples
+    return out
+
+
+def _investigate_payment(lines, country_flag, model, mode):
     if mode == "multi":
         return run_team("\n".join(lines), INVESTIGATOR_PAYMENT, PAYMENT_TOOLS, ADJUDICATOR_PAYMENT, REVIEWER_PAYMENT,
                         model=model, high_risk=country_flag)
@@ -714,6 +820,8 @@ def audit_fields(out):
         "agent_review": out.get("review"),
         "agent_revisions": out.get("revisions", 0),
         "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "agent_examples": [{"example_id": e["example_id"], "similarity": e["similarity"],
+                            "final_decision": e["final_decision"]} for e in out.get("examples", [])],
     }
 
 
@@ -727,6 +835,12 @@ def render_trace(out, key=""):
         msg = (f"🔍 Recenzent: **{rv.get('verdict', '?')}** · poprawki: {out.get('revisions', 0)}"
                + ("".join(f"\n- {i}" for i in rv.get("issues", [])) if rv.get("issues") else ""))
         (st.success if rv.get("verdict") == "APPROVE" else st.warning)(msg)
+    if out.get("examples"):
+        with st.expander(f"📚 Agent dostał przykłady od analityków: {len(out['examples'])}"):
+            for e in out["examples"]:
+                st.markdown(f"- **{e['customer_name']}** ↔ {e.get('sdn_name') or '—'} · agent: {e.get('agent_decision')} "
+                            f"→ analityk **{e['final_decision']}** · podobieństwo {e['similarity']} ({', '.join(e['why'])})"
+                            + (f"\n  > {e['comment']}" if e.get("comment") else ""))
     u = out.get("usage") or {}
     trace = out.get("trace") or []
     st.caption(f"🤖 {u.get('model', MODEL)} · kroki: {u.get('steps', len(trace))} · wywołania API: {u.get('api_calls', '?')} · "
