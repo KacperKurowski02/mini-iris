@@ -265,8 +265,8 @@ SUBMIT_TOOL = {
     "input_schema": {"type": "object", "properties": {
         "decision": {"type": "string", "enum": ["TRUE_MATCH", "FALSE_POSITIVE", "ESCALATE"]},
         "rule": {"type": "string", "description": "Numer zastosowanej zasady polityki, np. R3 lub P2"},
+        "confidence": {"type": "number", "description": "Pewność 0.0-1.0 (osobne pole, nie wpisuj jej do uzasadnienia)"},
         "rationale": {"type": "string", "description": "Uzasadnienie po polsku: co się zgadza, co nie, dlaczego ta zasada"},
-        "confidence": {"type": "number", "description": "Pewność 0.0-1.0"},
         "evidence": {"type": "array", "items": {"type": "string"},
                      "description": "Konkretne fakty zwrócone przez narzędzia, na których opierasz decyzję"},
         "factors": {"type": "array", "items": {"type": "object", "properties": {
@@ -432,8 +432,37 @@ def run_agent(system, case_text, tool_names, model=MODEL, max_steps=MAX_STEPS, f
     return final, trace, usage, stop
 
 
+LEAK_RE = re.compile(r'<parameter name="(\w+)">(.*?)(?=</parameter>|<parameter name=|</invoke>|$)', re.S)
+
+
+def repair_tool_input(final):
+    """Naprawa znanego błędu modelu: czasem wpisuje dalsze pola (np. confidence) DO ŚRODKA tekstu uzasadnienia,
+    w postaci '...</rationale> <parameter name="confidence">0.95'. Wtedy pole confidence jest puste, a decyzja
+    byłaby niesłusznie eskalowana. Odzyskujemy te pola i czyścimy uzasadnienie."""
+    if not isinstance(final, dict):
+        return final
+    out = dict(final)
+    for key in ("rationale", "rule"):
+        text = out.get(key)
+        if not isinstance(text, str) or ("<parameter name=" not in text and "</" not in text):
+            continue
+        cut = min([i for i in (text.find("</"), text.find("<parameter name=")) if i >= 0])
+        for name, raw in LEAK_RE.findall(text[cut:]):
+            raw = raw.strip()
+            if out.get(name) not in (None, "", []):
+                continue
+            try:
+                out[name] = json.loads(raw)
+            except ValueError:
+                out[name] = raw
+        out[key] = text[:cut].strip()
+        out["repaired"] = True
+    return out
+
+
 def finalize(final, trace, usage, stop, high_risk=False):
     """Walidacja + bezpieczniki: zła odpowiedź / niska pewność / kraj wysokiego ryzyka -> ESCALATE."""
+    final = repair_tool_input(final)
     if not isinstance(final, dict) or final.get("decision") not in ("TRUE_MATCH", "FALSE_POSITIVE", "ESCALATE"):
         out = {"decision": "ESCALATE", "rule": "-", "confidence": 0.0, "factors": [], "evidence": [],
                "auto_escalated": True,
@@ -617,6 +646,7 @@ def prompt_version(mode="tools"):
                 + json.dumps(tools_for(CUSTOMER_TOOLS, FINDINGS_TOOL), sort_keys=True))
     else:
         text = (SYSTEM_CUSTOMER + json.dumps(tools_for(CUSTOMER_TOOLS), sort_keys=True)) if mode == "tools" else SYSTEM_SINGLE
+    text += json.dumps(SUBMIT_TOOL, sort_keys=True) + json.dumps(REVIEW_TOOL, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
