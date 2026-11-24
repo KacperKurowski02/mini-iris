@@ -46,6 +46,14 @@ flowchart LR
     F & M & Q --> L[(Hash-chained<br/>audit log)]
 ```
 
+## Screenshots
+
+![Evaluation page comparing agent architectures](docs/img/evaluation.png)
+*Evaluation page: run history across agent architectures, per-run metrics and confusion matrices against ground truth and policy.*
+
+![Rules page explaining the flow and policy](docs/img/rules.png)
+*Rules page: plain-language explanation of the screening flow, guardrails, analyst feedback loop and audit log.*
+
 ## Pipeline
 
 1. **Sanctions list**: OFAC SDN list (individuals + aliases, ~16k names) parsed and cleaned. `01_explore_sdn.ipynb`

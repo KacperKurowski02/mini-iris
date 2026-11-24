@@ -1,6 +1,6 @@
-pandas
-rapidfuzz
-faker
-anthropic
-python-dotenv
-streamlit
+pandas==3.1.1
+rapidfuzz==3.14.6
+faker==40.63.0
+anthropic==2.12.0
+python-dotenv==1.2.4
+streamlit==1.67.0
